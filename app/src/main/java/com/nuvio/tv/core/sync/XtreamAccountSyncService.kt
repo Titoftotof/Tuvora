@@ -1,0 +1,621 @@
+package com.nuvio.tv.core.sync
+
+import android.util.Log
+import com.nuvio.tv.core.auth.AuthManager
+import com.nuvio.tv.core.iptv.CategorySelections
+import com.nuvio.tv.core.iptv.XtreamAccount
+import com.nuvio.tv.core.iptv.PulledPlaylist
+import com.nuvio.tv.core.iptv.m3uAccountFromUrl
+import com.nuvio.tv.core.iptv.tvLegacyM3uId
+import com.nuvio.tv.core.network.SyncBackendSupabaseProvider
+import com.nuvio.tv.core.profile.ProfileManager
+import com.nuvio.tv.data.local.XtreamAccountStore
+import com.nuvio.tv.data.remote.supabase.SupabaseIptvPlaylist
+import com.nuvio.tv.data.remote.supabase.SupabaseXtreamAccount
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import javax.inject.Inject
+import javax.inject.Singleton
+
+private const val TAG = "XtreamAccountSyncService"
+
+/**
+ * Syncs IPTV playlists (Xtream accounts + playlist-manager options) per profile to Supabase,
+ * mirroring AddonSyncService. Push = full-replace RPC on change (debounced from the settings VM);
+ * pull = direct RLS-scoped select on login. Empty remote + non-empty local => migrate local up.
+ *
+ * v2 (playlist manager P1): push/pull target the `iptv_playlists` table + RPC. Pull falls back
+ * to the legacy `xtream_accounts` table when `iptv_playlists` has no xtream rows, applies the
+ * legacy rows locally (defaults for the new option fields) and pushes them up to the NEW table —
+ * a one-way upgrade per spec §12. After a successful migration push the legacy rows are cleared
+ * (one write of `[]` to the old RPC) so the fallback is one-shot; the legacy RPC is never
+ * written otherwise.
+ */
+@Singleton
+class XtreamAccountSyncService @Inject constructor(
+    private val supabaseProvider: SyncBackendSupabaseProvider,
+    private val authManager: AuthManager,
+    private val accountStore: XtreamAccountStore,
+    private val profileManager: ProfileManager,
+    private val purge: com.nuvio.tv.core.iptv.IptvAccountPurge,
+    private val resolver: com.nuvio.tv.core.iptv.match.XtreamTmdbResolver,
+    private val rekeyer: com.nuvio.tv.core.iptv.PlaylistKeyRekeyer,
+    private val serverFailover: com.nuvio.tv.core.iptv.PlaylistServerFailover,
+    private val managedRefresher: com.nuvio.tv.core.iptv.ManagedInfoRefresher,
+) {
+    private val postgrest get() = supabaseProvider.postgrest
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pushJob: Job? = null
+    private val gson = com.google.gson.Gson()
+
+    var isSyncingFromRemote: Boolean = false
+
+    private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
+        return try {
+            block()
+        } catch (e: Exception) {
+            if (!authManager.refreshSessionIfJwtExpired(e)) throw e
+            block()
+        }
+    }
+
+    /** Debounced push after a local account change (called from XtreamSettingsViewModel). */
+    fun triggerRemoteSync() {
+        if (isSyncingFromRemote || !authManager.canSync) return
+        val profileId = profileManager.activeProfileId.value
+        pushJob?.cancel()
+        pushJob = scope.launch {
+            delay(600)
+            if (!isSyncingFromRemote && profileManager.activeProfileId.value == profileId) {
+                when (activationFor(profileId)) {
+                    com.nuvio.tv.core.iptv.PlaylistSyncActivation.V2_ACTIVE -> runV2SyncForProfile(profileId)
+                    com.nuvio.tv.core.iptv.PlaylistSyncActivation.V1_LEGACY -> pushProfileToRemote(profileId)
+                    com.nuvio.tv.core.iptv.PlaylistSyncActivation.V2_PAUSED ->
+                        Log.w(TAG, "triggerRemoteSync — v2 paused; pending retained, no v1 write")
+                }
+            }
+        }
+    }
+
+    /** [onlyIfEmpty] is the legacy-migration guard: the loser of a two-device first-login
+     *  race becomes a no-op instead of a full-replace with stale legacy rows. */
+    suspend fun pushToRemote(onlyIfEmpty: Boolean = false): Result<Unit> =
+        pushProfileToRemote(profileManager.activeProfileId.value, onlyIfEmpty)
+
+    private suspend fun pushProfileToRemote(profileId: Int, onlyIfEmpty: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            // B24 §2: capture authority AND the outgoing accounts from ONE read of THIS profile's
+            // blob. The prior code read authority (canPushFullReplace) and the payload (the
+            // active-profile accounts flow) separately — a profile switch in between could push
+            // another profile's accounts under this id, and a concurrent edit could desync the
+            // authority decision from the payload. The snapshot is an immutable value, so nothing
+            // that happens during the network call below can redirect it or change what it sends.
+            val snapshot = accountStore.pushSnapshot(profileId)
+            // A full-replace whose blob is not authoritative (absent/reset, corrupt, or partially
+            // recovered) would delete-then-insert an empty/truncated set and wipe the server.
+            // Withhold it; a genuine delete-all writes [] and stays pushable (B24).
+            if (!snapshot.canFullReplace) {
+                Log.w(TAG, "pushToRemote withheld: local playlist store not authoritative (absent/corrupt); preserving server (B24)")
+                return@withContext Result.success(Unit)
+            }
+            val params = playlistPushParams(snapshot.accounts, snapshot.profileId, onlyIfEmpty)
+            // No lock is held across this network call; the payload is the immutable snapshot, and a
+            // failure below leaves NO local authority/synced state changed (it can neither authorize
+            // a future push nor mark a newer edit synced — this push records nothing locally).
+            withJwtRefreshRetry { postgrest.rpc("sync_push_iptv_playlists", params) }
+            Log.d(TAG, "Pushed ${snapshot.accounts.size} iptv playlists for profile ${snapshot.profileId}")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to push iptv playlists", e)
+            Result.failure(e)
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // B24 v2 — the REAL revision-contract sync path (debug/local only; see PlaylistSyncConfig).
+    // Drives the shared PlaylistV2SyncEngine through a transport that calls the actual v2 RPCs, using
+    // the real account store + reconcile core. Serialized per call by [v2Mutex]; the network calls
+    // happen INSIDE the engine, not inside any DataStore edit lock.
+    // ---------------------------------------------------------------------------------------------
+    private val v2Mutex = kotlinx.coroutines.sync.Mutex()
+    private val pullJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    private fun newPlaylistMutationId(): String =
+        "m-" + kotlin.random.Random.nextLong().toULong().toString(16) + kotlin.random.Random.nextLong().toULong().toString(16)
+
+    private val v2Transport = object : com.nuvio.tv.core.iptv.PlaylistSyncTransport {
+        override suspend fun pull(profileId: Int): com.nuvio.tv.core.iptv.PlaylistPullResponse {
+            val result: JsonObject = withJwtRefreshRetry {
+                postgrest.rpc("sync_pull_iptv_playlists_v2", buildJsonObject { put("p_profile_id", profileId) }).decodeAs()
+            }
+            val revision = (result["revision"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+            val generation = (result["generation"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+            val rows = (result["playlists"] as? JsonArray ?: JsonArray(emptyList())).mapNotNull { el ->
+                runCatching { pullJson.decodeFromJsonElement(SupabaseIptvPlaylist.serializer(), el) }.getOrNull()
+            }
+            val pulled = pulledPlaylists(rows)
+            return com.nuvio.tv.core.iptv.PlaylistPullResponse(revision, pulled.map { it.account }, generation, pulled.keyedIds())
+        }
+
+        override suspend fun push(
+            profileId: Int, expectedRevision: Long?, accounts: List<XtreamAccount>, deleteAll: Boolean, mutationId: String,
+            expectedGeneration: Long?,
+        ): com.nuvio.tv.core.iptv.PlaylistPushResponse {
+            val params = buildJsonObject {
+                put("p_profile_id", profileId)
+                put("p_expected_revision", if (expectedRevision == null) JsonNull else JsonPrimitive(expectedRevision))
+                put("p_playlists", buildJsonArray { accounts.forEachIndexed { i, acc -> add(playlistPushJson(acc, i)) } })
+                put("p_source_types", buildJsonArray { SYNCED_SOURCE_TYPES.forEach { add(it) } })
+                put("p_delete_all", deleteAll)
+                put("p_mutation_id", mutationId)
+                put("p_expected_generation", if (expectedGeneration == null) JsonNull else JsonPrimitive(expectedGeneration))
+            }
+            val result: JsonObject = withJwtRefreshRetry {
+                postgrest.rpc("sync_push_iptv_playlists_v2", params).decodeAs()
+            }
+            return when ((result["status"] as? JsonPrimitive)?.content) {
+                "ok" -> com.nuvio.tv.core.iptv.PlaylistPushResponse.Ok(
+                    revision = (result["revision"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L,
+                    deduped = (result["deduped"] as? JsonPrimitive)?.content?.toBoolean() ?: false,
+                )
+                "conflict" -> {
+                    val curRows = (result["current_rows"] as? JsonArray ?: JsonArray(emptyList()))
+                        .mapNotNull { el -> runCatching { pullJson.decodeFromJsonElement(SupabaseIptvPlaylist.serializer(), el) }.getOrNull() }
+                    val pulled = pulledPlaylists(curRows)
+                    com.nuvio.tv.core.iptv.PlaylistPushResponse.Conflict(
+                        currentRevision = (result["current_revision"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L,
+                        currentRows = pulled.map { it.account },
+                        currentKeyedIds = pulled.keyedIds(),
+                    )
+                }
+                else -> com.nuvio.tv.core.iptv.PlaylistPushResponse.Rejected(result.toString())
+            }
+        }
+    }
+
+    /** Runs one full v2 sync for the active profile. Never falls back to v1. */
+    /** Per-profile activation: reads the active profile's stored sync-state to decide adoption, then
+     *  applies the rollout policy (B24 production activation). */
+    private suspend fun activationFor(profileId: Int): com.nuvio.tv.core.iptv.PlaylistSyncActivation {
+        val st = com.nuvio.tv.core.iptv.decodePlaylistSyncState(gson, accountStore.loadPlaylistSyncStateRaw(profileId))
+        val adopted = st.revision > 0 || st.pending.isNotEmpty()
+        return com.nuvio.tv.core.iptv.PlaylistSyncConfig.activationFor(adopted)
+    }
+
+    suspend fun runV2Sync(): Result<Unit> = runV2SyncForProfile(profileManager.activeProfileId.value)
+
+    private suspend fun runV2SyncForProfile(profileId: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        // Capture the initial local snapshot synchronously-enough (before the engine mutates it). A
+        // Step 0 key adoption renames ids in it (and nothing else), so it is re-read after one.
+        var startAccounts = runCatching { accountStore.accountsForProfile(profileId) }.getOrDefault(emptyList())
+        val startCanPush = runCatching { accountStore.canPushFullReplace(profileId) }.getOrDefault(false)
+        val engine = com.nuvio.tv.core.iptv.PlaylistV2SyncEngine(
+            transport = v2Transport,
+            loadState = { com.nuvio.tv.core.iptv.decodePlaylistSyncState(gson, accountStore.loadPlaylistSyncStateRaw(it)) },
+            saveState = { p, s -> accountStore.savePlaylistSyncStateRaw(p, com.nuvio.tv.core.iptv.encodePlaylistSyncState(gson, s)) },
+            currentAccounts = { startAccounts },
+            canPush = { startCanPush },
+            applyLocal = { p, accounts ->
+                val local = runCatching { accountStore.accountsForProfile(p) }.getOrDefault(startAccounts)
+                applyRemote(p, v2ApplyLocal(accounts, local))
+            },
+            stillActive = { profileManager.activeProfileId.value == it },
+            newMutationId = { newPlaylistMutationId() },
+            // "In sync" = the same server rows, compared on exactly what the push writes (B60).
+            syncedKey = { playlistPushJson(it, sortOrder = 0) },
+            // The mutation id is bound to exactly what the push sends (B68).
+            wirePayload = { accounts -> buildJsonArray { accounts.forEachIndexed { i, acc -> add(playlistPushJson(acc, i)) } }.toString() },
+            // Step 0: adopt server playlist keys (re-keys local ids + their saved data, once).
+            adoptKeys = { p, pulled, keyed ->
+                rekeyer.adoptFromPull(p, pulled.map { PulledPlaylist(it, it.id in keyed) }).also { r ->
+                    if (r.rekeys.isNotEmpty()) {
+                        startAccounts = runCatching { accountStore.accountsForProfile(p) }.getOrDefault(startAccounts)
+                    }
+                }
+            },
+        )
+        v2Mutex.lock()
+        val outcome = try {
+            engine.sync(profileId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "runV2Sync FAILED (no v1 fallback; server preserved)", e)
+            com.nuvio.tv.core.iptv.PlaylistSyncOutcome.PUSH_FAILED
+        } finally {
+            v2Mutex.unlock()
+        }
+        Log.i(TAG, "runV2Sync(profile $profileId) — $outcome")
+        // Step 2: a pull ran (SYNCED / UP_TO_DATE / WITHHELD) -> the managed-playlist map may need a read, but only
+        // per ManagedRefreshPolicy (>= 1 playlist; revision changed / no cache / cache stale). Never a timer.
+        // WITHHELD is a pull that was applied while the local store could not push (a fresh install) — still a pull.
+        val pulled = outcome == com.nuvio.tv.core.iptv.PlaylistSyncOutcome.SYNCED ||
+            outcome == com.nuvio.tv.core.iptv.PlaylistSyncOutcome.UP_TO_DATE ||
+            outcome == com.nuvio.tv.core.iptv.PlaylistSyncOutcome.WITHHELD
+        if (pulled) {
+            runCatching {
+                val revision = com.nuvio.tv.core.iptv.decodePlaylistSyncState(gson, accountStore.loadPlaylistSyncStateRaw(profileId)).revision
+                managedRefresher.afterPull(profileId, pullSucceeded = true, playlistCount = accountStore.accountsForProfile(profileId).size, revision = revision)
+            }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+        }
+        Result.success(Unit)
+    }
+
+    /**
+     * Pull this profile's playlists and apply them locally.
+     * No usable (xtream) rows in `iptv_playlists` => fall back to the legacy `xtream_accounts`
+     * select and, when legacy rows exist, migrate them up to the new table (then clear them).
+     * Both empty + non-empty local => push local up (source-type-scoped, so it can't delete
+     * foreign rows).
+     */
+    suspend fun pullAndApply(): Result<Unit> = pullAndApplyForProfile(profileManager.activeProfileId.value)
+
+    private suspend fun pullAndApplyForProfile(profileId: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        when (activationFor(profileId)) {
+            com.nuvio.tv.core.iptv.PlaylistSyncActivation.V2_ACTIVE -> return@withContext runV2SyncForProfile(profileId)
+            // Adopted-but-paused: don't run a v1 pull/apply that could overwrite local; freeze the
+            // profile (local + pending preserved) until v2 is re-enabled.
+            com.nuvio.tv.core.iptv.PlaylistSyncActivation.V2_PAUSED -> {
+                Log.w(TAG, "pullAndApply — v2 paused; skipping (local + pending preserved)")
+                return@withContext Result.success(Unit)
+            }
+            com.nuvio.tv.core.iptv.PlaylistSyncActivation.V1_LEGACY -> Unit // fall through to legacy v1
+        }
+        try {
+            val effectiveUserId = authManager.getEffectiveUserId(fallbackToOwnIdOnFailure = false)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("Unable to resolve sync owner for xtream sync")
+                )
+            val rows = withJwtRefreshRetry {
+                postgrest.from("iptv_playlists")
+                    .select { filter {
+                        eq("user_id", effectiveUserId)
+                        eq("profile_id", profileId)
+                    } }
+                    .decodeList<SupabaseIptvPlaylist>()
+            }
+            // Emptiness is decided AFTER filtering to rows this client understands: a table
+            // holding only foreign source types (a future client's) must behave exactly like an
+            // empty remote — applying an empty list would wipe local state.
+            val pulled = pulledPlaylists(rows.sortedBy { it.sortOrder })
+            if (pulled.isNotEmpty()) {
+                // Step 0: adopt server playlist keys first (re-keys local ids + their saved data, once).
+                val remoteAccounts = rekeyer.adoptFromPull(profileId, pulled).accounts
+                val local = accountStore.accountsForProfile(profileId)
+                applyRemote(profileId, preserveDeviceLocalPrefs(remoteAccounts, local))
+                Log.d(TAG, "Pulled ${remoteAccounts.size} iptv playlists for profile $profileId")
+                // Step 2: legacy (non-v2) pull that returned playlists -> same managed-map rule (no revision known).
+                runCatching { managedRefresher.afterPull(profileId, pullSucceeded = true, playlistCount = remoteAccounts.size, revision = null) }
+                    .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+                return@withContext Result.success(Unit)
+            }
+
+            // Legacy fallback: rows written by pre-playlist-manager clients.
+            val legacy = withJwtRefreshRetry {
+                postgrest.from("xtream_accounts")
+                    .select { filter {
+                        eq("user_id", effectiveUserId)
+                        eq("profile_id", profileId)
+                    } }
+                    .decodeList<SupabaseXtreamAccount>()
+            }
+            if (legacy.isNotEmpty()) {
+                val accounts = legacy.sortedBy { it.sortOrder }.map {
+                    XtreamAccount(
+                        id = "${it.baseUrl}|${it.username}",
+                        name = it.name ?: com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.fallbackName(it.baseUrl),
+                        baseUrl = it.baseUrl,
+                        username = it.username,
+                        password = it.password,
+                        enabled = it.enabled,
+                        // new playlist options take their defaults
+                    )
+                }
+                applyRemote(profileId, accounts)
+                // One-way migration: copy the legacy rows into the new table (only-if-empty so
+                // the loser of a two-device first-login race is a no-op), then clear the legacy
+                // rows — a stale legacy copy would resurrect deleted playlists on every login.
+                if (pushProfileToRemote(profileId, onlyIfEmpty = true).isSuccess) clearLegacyRemote(profileId)
+                Log.d(TAG, "Migrated ${accounts.size} legacy xtream accounts to iptv_playlists for profile $profileId")
+                return@withContext Result.success(Unit)
+            }
+
+            if (accountStore.accountsForProfile(profileId).isNotEmpty()) pushProfileToRemote(profileId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            isSyncingFromRemote = false
+            Log.e(TAG, "Failed to pull iptv playlists", e)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun applyRemote(profileId: Int, accounts: List<XtreamAccount>) {
+        val before = accountStore.accountsForProfile(profileId)
+        isSyncingFromRemote = true
+        try {
+            accountStore.replaceAllForProfile(profileId, accounts)
+        } finally {
+            isSyncingFromRemote = false
+        }
+        // Step 0.3: a server list changed on another device restarts this device on the main server.
+        serverFailover.onPulled(before, accounts)
+        // Playlists removed on another device: the same cache purge as a local delete. Saved user
+        // data is untouched — a pull can be transient (see PlaylistRemovalOrigin.SyncPull).
+        com.nuvio.tv.core.iptv.PlaylistRemovalCleanup.removedIds(before.map { it.id }, accounts.map { it.id })
+            .forEach { runCatching { purge.purge(it, com.nuvio.tv.core.iptv.PlaylistRemovalOrigin.SyncPull) } }
+        // Playlists added on another device: index them now, not on first play.
+        resolver.warmUp(accounts)
+    }
+
+    /** One-shot legacy cleanup after a successful migration push: empty the old
+     *  `xtream_accounts` rows so they can't resurrect deleted playlists on a later login.
+     *  Best-effort — a failure just leaves the (idempotent) migration to run again. */
+    private suspend fun clearLegacyRemote(profileId: Int) {
+        try {
+            val params = buildJsonObject {
+                put("p_profile_id", profileId)
+                put("p_accounts", JsonArray(emptyList()))
+            }
+            withJwtRefreshRetry { postgrest.rpc("sync_push_xtream_accounts", params) }
+            Log.d(TAG, "Cleared legacy xtream_accounts rows for profile $profileId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear legacy xtream_accounts rows", e)
+        }
+    }
+}
+
+// Wire (backend column enum) <-> internal source-type mapping. The table stores
+// xtream | m3u_url | m3u_file | stalker; this client's internal spellings for M3U are
+// SOURCE_URL ("url") / SOURCE_FILE ("file"). Mobile already writes the canonical names.
+private const val WIRE_M3U_URL = "m3u_url"
+private const val WIRE_M3U_FILE = "m3u_file"
+
+internal fun wireSourceType(internalType: String): String = when (internalType) {
+    XtreamAccount.SOURCE_URL -> WIRE_M3U_URL
+    XtreamAccount.SOURCE_FILE -> WIRE_M3U_FILE
+    else -> internalType
+}
+
+/**
+ * Maps a sync row to a local account for every source type this client understands; null for
+ * malformed rows and unknown (future) source types — those stay remote-only, and the push scope
+ * (p_source_types) guarantees we never delete them. The internal "url"/"file" spellings are
+ * accepted as aliases beside the canonical wire names (defensive).
+ *
+ * Step 0: the id is the row's `playlist_key` when the server has one. Without it (an un-migrated
+ * server) it is TV's pre-Step-0 derivation from the address — and [PlaylistKeyAdoption] then keeps
+ * the local id of the same playlist, so a frozen id is never re-derived away.
+ */
+internal fun SupabaseIptvPlaylist.toXtreamAccountOrNull(): XtreamAccount? {
+    val acc = toDerivedAccountOrNull() ?: return null
+    return acc.copy(
+        id = playlistKey?.takeIf { it.isNotBlank() } ?: acc.id,
+        backupUrls = backupUrls?.takeIf { it.isNotEmpty() },
+    )
+}
+
+/** The pull's view of [rows]: each usable row's account and whether its id is the server's key. */
+internal fun pulledPlaylists(rows: List<SupabaseIptvPlaylist>): List<PulledPlaylist> =
+    rows.mapNotNull { row -> row.toXtreamAccountOrNull()?.let { PulledPlaylist(it, serverKeyed = !row.playlistKey.isNullOrBlank()) } }
+
+internal fun List<PulledPlaylist>.keyedIds(): Set<String> = filter { it.serverKeyed }.map { it.account.id }.toSet()
+
+/** The pre-Step-0 id derivation from a row's address (the fallback while the server has no key). */
+private fun SupabaseIptvPlaylist.toDerivedAccountOrNull(): XtreamAccount? {
+    val base: XtreamAccount = when (sourceType) {
+        XtreamAccount.SOURCE_XTREAM -> {
+            val baseUrl = baseUrl ?: return null
+            val user = username ?: return null
+            val pass = password ?: return null
+            XtreamAccount(
+                id = "$baseUrl|$user",
+                name = name ?: com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.fallbackName(baseUrl),
+                baseUrl = baseUrl,
+                username = user,
+                password = pass,
+                enabled = enabled,
+                sourceType = XtreamAccount.SOURCE_XTREAM,
+                userAgent = userAgent?.takeIf { it.isNotBlank() }   // canonical `user_agent` column
+            )
+        }
+        WIRE_M3U_URL, XtreamAccount.SOURCE_URL -> {
+            val playlistUrl = (url ?: baseUrl)?.takeIf { it.isNotBlank() } ?: return null
+            // UA rides `user_agent` (canonical) with `username` as the legacy stash this client
+            // itself used to write.
+            m3uAccountFromUrl(
+                playlistUrl,
+                userAgent = (userAgent ?: username)?.takeIf { it.isNotBlank() },
+                name = name
+            )?.let { it.copy(id = tvLegacyM3uId(playlistUrl) ?: it.id, enabled = enabled) } ?: return null
+        }
+        WIRE_M3U_FILE, XtreamAccount.SOURCE_FILE -> {
+            // File BYTES are never synced — this lands as a re-import ghost. Deterministic id so
+            // repeated pulls are stable; PlaylistKeyAdoption matches it to this device's real file
+            // copy by file name.
+            val fn = (fileName ?: name)?.takeIf { it.isNotBlank() } ?: "Playlist"
+            XtreamAccount(
+                id = "file:synced-$fn",
+                name = name ?: fn.substringBeforeLast('.'),
+                baseUrl = "",
+                username = "",
+                password = "",
+                enabled = enabled,
+                sourceType = XtreamAccount.SOURCE_FILE,
+                fileName = fn
+            )
+        }
+        XtreamAccount.SOURCE_STALKER -> {
+            val portal = (portalUrl ?: baseUrl)?.takeIf { it.isNotBlank() } ?: return null
+            val mac = macAddress?.takeIf { it.isNotBlank() } ?: return null
+            XtreamAccount(
+                id = "stalker|$portal|$mac",
+                name = name ?: com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.fallbackName(portal),
+                baseUrl = portal,
+                username = "",
+                password = "",
+                enabled = enabled,
+                sourceType = XtreamAccount.SOURCE_STALKER,
+                portalUrl = portal,
+                macAddress = mac,
+                stalkerUsername = stalkerUsername.orEmpty(),
+                stalkerPassword = stalkerPassword.orEmpty(),
+                serialNumber = serialNumber.orEmpty(),
+                deviceId = deviceId.orEmpty(),
+                sendDeviceId = sendDeviceId,
+                deviceId2 = deviceId2?.trim().orEmpty(),
+                signature = signature?.trim().orEmpty(),
+                stbModel = stbModel?.trim().orEmpty(),
+                hwVersion = hwVersion?.trim().orEmpty(),
+                // B04: a Stalker playlist's UA rides the shared `user_agent` column too. Not reading it
+                // here (and not writing it on push) made every TV sync blank it for every device.
+                userAgent = userAgent?.takeIf { it.isNotBlank() }
+            )
+        }
+        else -> return null
+    }
+    return base.copy(
+        epgUrl = epgUrl,
+        dnsProvider = dnsProvider,
+        autoRefreshHours = autoRefreshHours,
+        contentTypes = contentTypes.toSet(),
+        categorySelections = decodeCategorySelections(categorySelections)
+    )
+}
+
+/**
+ * Carries this device's catch-up and guide preferences across a pull.
+ *
+ * A pull REPLACES the account list with objects rebuilt from the wire, so any field the payload does
+ * not carry comes back as its constructor default. The catch-up container preference, the manual
+ * time correction and the guide EPG offset are deliberately not on the wire — they tune ONE panel's
+ * behaviour as reached from THIS device (the same reasoning that keeps the proven-dialect memory in
+ * device-local SharedPreferences), and a shared column would need a backend migration to hold them.
+ *
+ * Without this, every sync would silently reset them, which is exactly the kind of "my setting keeps
+ * un-setting itself" bug that is impossible to report and miserable to find.
+ */
+internal fun preserveDeviceLocalPrefs(
+    pulled: List<XtreamAccount>,
+    local: List<XtreamAccount>
+): List<XtreamAccount> = pulled.map { acc ->
+    val match = local.firstOrNull { it.id == acc.id } ?: return@map acc
+    acc.copy(
+        preferM3u8CatchUp = match.preferM3u8CatchUp,
+        catchUpCorrectionMinutes = match.catchUpCorrectionMinutes,
+        guideEpgCorrectionMinutes = match.guideEpgCorrectionMinutes,
+        cleanChannelNames = match.cleanChannelNames,
+        channelNameTags = match.channelNameTags,
+    )
+}
+
+/** The wire source types this client fully understands — the push's full-replace scope. Unknown
+ *  (future) types stay outside the scope, so they can never be deleted by this client. */
+internal val SYNCED_SOURCE_TYPES = listOf(
+    XtreamAccount.SOURCE_XTREAM, WIRE_M3U_URL, WIRE_M3U_FILE, XtreamAccount.SOURCE_STALKER
+)
+
+/**
+ * Full parameter object for `sync_push_iptv_playlists`. Every push scopes the full-replace with
+ * the source types this client understands, so it never deletes rows of a type it doesn't
+ * (written by a newer client). `p_only_if_empty` is sent only on the legacy-migration push.
+ */
+internal fun playlistPushParams(accounts: List<XtreamAccount>, profileId: Int, onlyIfEmpty: Boolean): JsonObject =
+    buildJsonObject {
+        put("p_playlists", buildJsonArray {
+            accounts.forEachIndexed { index, acc -> add(playlistPushJson(acc, index)) }
+        })
+        put("p_profile_id", profileId)
+        put("p_source_types", buildJsonArray { SYNCED_SOURCE_TYPES.forEach { add(it) } })
+        if (onlyIfEmpty) put("p_only_if_empty", true)
+    }
+
+/**
+ * One playlist row of the `sync_push_iptv_playlists` payload. Contract (must match the
+ * migration RPC in nuvio-backend `20260702210000_iptv_playlists.sql`): source_type is the WIRE
+ * name (m3u_url/m3u_file for this client's url/file); per-type extras ride their dedicated
+ * columns (url/user_agent, file_name, portal_url/mac_address/stalker_*); name is omitted when
+ * blank, epg_url when null, category_selections when all-null — the RPC's coalesce defaults apply.
+ */
+internal fun playlistPushJson(acc: XtreamAccount, sortOrder: Int): JsonObject = buildJsonObject {
+    // Step 0: the permanent id + the client-owned backup list ride every push.
+    put("playlist_key", acc.id)
+    put("backup_urls", buildJsonArray { acc.backupUrls.orEmpty().forEach { add(it) } })
+    put("source_type", wireSourceType(acc.sourceType))
+    if (acc.name.isNotBlank()) put("name", acc.name)
+    put("enabled", acc.enabled)
+    put("sort_order", sortOrder)
+    put("base_url", acc.baseUrl)
+    put("username", acc.username)
+    put("password", acc.password)
+    when (acc.sourceType) {
+        XtreamAccount.SOURCE_XTREAM -> {
+            // Optional per-playlist stream UA (base_url/username/password already put above).
+            acc.userAgent?.takeIf { it.isNotBlank() }?.let { put("user_agent", it) }
+        }
+        XtreamAccount.SOURCE_URL -> {
+            put("url", acc.baseUrl)                                    // the playlist URL IS the base
+            acc.username.takeIf { it.isNotBlank() }?.let { put("user_agent", it) }   // UA lives in username
+        }
+        XtreamAccount.SOURCE_FILE -> {
+            acc.fileName?.takeIf { it.isNotBlank() }?.let { put("file_name", it) }   // metadata only
+        }
+        XtreamAccount.SOURCE_STALKER -> {
+            put("portal_url", acc.portalUrl)
+            put("mac_address", acc.macAddress)
+            acc.stalkerUsername.takeIf { it.isNotBlank() }?.let { put("stalker_username", it) }
+            acc.stalkerPassword.takeIf { it.isNotBlank() }?.let { put("stalker_password", it) }
+            acc.serialNumber.takeIf { it.isNotBlank() }?.let { put("serial_number", it) }
+            acc.deviceId.takeIf { it.isNotBlank() }?.let { put("device_id", it) }
+            put("send_device_id", acc.sendDeviceId)
+            // F46: ALWAYS present (null clears). The server carries a column forward when its key is
+            // ABSENT, so a build that predates these fields can never wipe them — which means a
+            // cleared field has to be sent as an explicit null to be cleared.
+            put("device_id2", acc.deviceId2.takeIf { it.isNotBlank() })
+            put("signature", acc.signature.takeIf { it.isNotBlank() })
+            put("stb_model", acc.stbModel.takeIf { it.isNotBlank() })
+            put("hw_version", acc.hwVersion.takeIf { it.isNotBlank() })
+            acc.userAgent?.takeIf { it.isNotBlank() }?.let { put("user_agent", it) }   // B04: round-trip the UA
+        }
+    }
+    acc.epgUrl?.let { put("epg_url", it) }
+    put("dns_provider", acc.dnsProvider)
+    put("auto_refresh_hours", acc.autoRefreshHours)
+    put("content_types", buildJsonArray { acc.contentTypes.forEach { add(it) } })
+    val sel = acc.categorySelections
+    if (!sel.allNull) {
+        put("category_selections", buildJsonObject {
+            sel.live?.let { put("live", JsonArray(it.map(::JsonPrimitive))) }
+            sel.movies?.let { put("movies", JsonArray(it.map(::JsonPrimitive))) }
+            sel.series?.let { put("series", JsonArray(it.map(::JsonPrimitive))) }
+        })
+    }
+}
+
+/** Lenient jsonb -> CategorySelections: anything malformed degrades to "all categories". */
+internal fun decodeCategorySelections(element: JsonElement?): CategorySelections {
+    val obj = element as? JsonObject ?: return CategorySelections()
+    fun list(key: String): List<String>? = (obj[key] as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p !is JsonNull }?.content }
+    return CategorySelections(live = list("live"), movies = list("movies"), series = list("series"))
+}
+
+/**
+ * What a v2 sync applies locally for a pulled/reconciled set: this device's local-only catch-up /
+ * guide preferences carried across ([preserveDeviceLocalPrefs]) — the treatment the v1 pull always
+ * gave them (B60 part c). Ids were already reconciled with this device's by [PlaylistKeyAdoption]
+ * when the set was pulled (Step 0).
+ */
+internal fun v2ApplyLocal(pulled: List<XtreamAccount>, local: List<XtreamAccount>): List<XtreamAccount> =
+    preserveDeviceLocalPrefs(pulled, local)

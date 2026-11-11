@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="clean_live_action_previous_channel">Chaîne précédente</string>
+    <string name="clean_live_action_play">Lire le direct</string>
+    <string name="clean_live_action_pause">Mettre le direct en pause</string>
+    <string name="clean_live_action_retry">Réessayer la lecture</string>
+    <string name="clean_live_action_next_channel">Chaîne suivante</string>
+    <string name="clean_live_action_exit">Quitter le direct</string>
+
+    <string name="clean_live_status_resolving">Ouverture de la chaîne…</string>
+    <string name="clean_live_status_starting">Démarrage de la lecture…</string>
+    <string name="clean_live_status_buffering">Mise en mémoire tampon…</string>
+    <string name="clean_live_status_recovering">Récupération de la lecture…</string>
+    <string name="clean_live_status_handing_off">Tentative avec un autre mode de lecture…</string>
+    <string name="clean_live_status_reconnecting">Reconnexion…</string>
+    <string name="clean_live_status_paused">En pause</string>
+    <string name="clean_live_status_releasing">Fermeture de la lecture…</string>
+    <string name="clean_live_status_stopped">Lecture arrêtée</string>
+
+    <string name="clean_live_error_preview_resource">L’aperçu n’est pas disponible en raison des limites de ressources de la TV.</string>
+    <string name="clean_live_error_preview_surface">L’aperçu n’est pas disponible sur cette surface d’affichage.</string>
+    <string name="clean_live_error_preview_path">Cette chaîne ne peut pas utiliser l’aperçu du guide.</string>
+    <string name="clean_live_error_preview_exhausted">Aucun mode d’aperçu du guide compatible n’est disponible.</string>
+    <string name="clean_live_error_stream_authorization">Le fournisseur n’a pas autorisé cette chaîne.</string>
+    <string name="clean_live_error_stream_expired">Cette chaîne n’est plus disponible.</string>
+    <string name="clean_live_error_stream_provider">Le fournisseur indique que cette chaîne est indisponible.</string>
+    <string name="clean_live_error_stream_no_graph">Cette chaîne n’a aucun mode de lecture compatible.</string>
+    <string name="clean_live_error_network">Impossible de joindre la chaîne via le réseau.</string>
+    <string name="clean_live_error_access">Le fournisseur a refusé ou limité cette connexion de lecture.</string>
+    <string name="clean_live_error_secure_connection">Impossible d’établir une connexion sécurisée avec la chaîne.</string>
+    <string name="clean_live_error_stream_format">La chaîne utilise un format de flux illisible.</string>
+    <string name="clean_live_error_video">L’appareil n’a pas pu décoder ou afficher cette chaîne.</string>
+    <string name="clean_live_error_surface">La surface vidéo a été perdue.</string>
+    <string name="clean_live_error_audio">L’appareil n’a pas pu ouvrir la sortie audio.</string>
+    <string name="clean_live_error_drm">Impossible d’ouvrir la protection de contenu de la chaîne.</string>
+    <string name="clean_live_error_resources">L’appareil ne dispose pas d’assez de ressources de lecture.</string>
+    <string name="clean_live_error_release">La session de lecture précédente ne s’est pas fermée correctement.</string>
+    <string name="clean_live_error_no_graph">Cet appareil ne peut pas lire ce flux. Essayez une autre chaîne ou changez de lecteur dans Paramètres → Lecture.</string>
+    <string name="clean_live_error_no_progress">La lecture s’est interrompue.</string>
+    <string name="clean_live_error_unknown">Échec de la lecture TV en direct.</string>
+    <!-- F28: the shared live overlay (guide fullscreen + clean live player). -->
+    <string name="live_action_add_favourite">Ajouter aux favoris</string>
+    <string name="live_action_remove_favourite">Retirer des favoris</string>
+    <string name="live_action_close">Fermer</string>
+    <string name="live_subtitles_off">Désactivés</string>
+    <string name="live_subtitles_closed_captions">Sous-titres sourds et malentendants</string>
+    <string name="live_subtitles_cannot_draw">Les sous-titres ne peuvent pas encore être affichés sur le flux vidéo de cette chaîne.</string>
+</resources>

@@ -1,0 +1,79 @@
+name: Build APK
+
+# Builds the Android TV debug APK ON DEMAND ONLY (Actions tab -> Run workflow). The job FAILS if
+# the build fails, and the APK is uploaded as a downloadable artifact ("nuviotv-full-debug").
+# Deliberately NOT run on every push to main or on PRs — that burned CI minutes on every commit;
+# release builds are owned by release.yml (tag push). Run this by hand when you want a debug APK
+# or a pre-release sanity check (it also runs the unit tests).
+# The debug build signs with the release config; CI generates a throwaway keystore
+# using the passwords already defaulted in app/build.gradle.kts.
+# Optional: set repo secrets SUPABASE_URL / SUPABASE_ANON_KEY to bake login into the CI APK.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle (deps + build cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The default list includes the long-deprecated 'tools' package, which cmdline-tools 16.0
+          # (runner image, 2026-09) no longer ships -> sdkmanager exits 1. The next step installs the rest.
+          packages: platform-tools
+
+      - name: Install SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v -keystore nuviotv.jks -alias nuviotv \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass 815787 -keypass 815787 \
+            -dname "CN=Nuvio CI, OU=CI, O=Nuvio, L=NA, S=NA, C=US"
+
+      - name: Configure local.properties
+        run: |
+          {
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+            echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}"
+            echo "TRAKT_CLIENT_ID=${{ secrets.TRAKT_CLIENT_ID }}"
+            echo "TRAKT_CLIENT_SECRET=${{ secrets.TRAKT_CLIENT_SECRET }}"
+            echo "SIMKL_CLIENT_ID=${{ secrets.SIMKL_CLIENT_ID }}"
+            echo "SIMKL_CLIENT_SECRET=${{ secrets.SIMKL_CLIENT_SECRET }}"
+            echo "DONATIONS_DONATE_URL=${{ secrets.DONATIONS_DONATE_URL }}"
+          } >> local.properties
+
+      - name: Raise Gradle heap for packaging
+        run: printf '\norg.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8\n' >> gradle.properties
+
+      - name: Run unit tests
+        run: ./gradlew :app:testFullDebugUnitTest --stacktrace
+
+      - name: Build debug APK (arm64-v8a only — fast per-push validation)
+        run: ./gradlew :app:assembleFullDebug -Pandroid.injected.build.abi=arm64-v8a --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp "$(find app/build -path '*/full/debug/*' -name '*.apk' | head -1)" dist/
+          ls -la dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuviotv-full-debug-arm64
+          path: dist/*.apk
+          if-no-files-found: error

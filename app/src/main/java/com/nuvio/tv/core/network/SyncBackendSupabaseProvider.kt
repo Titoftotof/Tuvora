@@ -1,0 +1,134 @@
+package com.nuvio.tv.core.network
+
+import com.nuvio.tv.BuildConfig
+import com.nuvio.tv.core.auth.shouldRetryAuthRefreshResponse
+import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.annotations.SupabaseInternal
+import io.github.jan.supabase.auth.Auth
+import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.createSupabaseClient
+import io.github.jan.supabase.postgrest.Postgrest
+import io.github.jan.supabase.postgrest.postgrest
+import io.github.jan.supabase.realtime.websocket.KtorRealtimeWebsocketFactory
+import io.github.jan.supabase.supabaseJson
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.serialization.kotlinx.KotlinxWebsocketSerializationConverter
+import kotlin.time.Duration.Companion.seconds
+import io.github.jan.supabase.realtime.Realtime
+import io.github.jan.supabase.storage.Storage
+import io.ktor.client.plugins.HttpRequestRetry
+import io.ktor.client.plugins.defaultRequest
+import io.ktor.http.HttpHeaders
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class SyncBackendSupabaseProvider @Inject constructor(
+    private val syncBackendRepository: SyncBackendRepository,
+    private val secureCredentials: com.nuvio.tv.core.security.SecureCredentialStore,
+) {
+    private data class ClientHolder(
+        val backend: SyncBackendConfig,
+        val client: SupabaseClient,
+    )
+
+    @Volatile
+    private var clientHolder: ClientHolder? = null
+
+    val selectedBackend: SyncBackendConfig
+        get() = syncBackendRepository.selectedBackend
+
+    val client: SupabaseClient
+        get() = clientFor(selectedBackend)
+
+    val auth: Auth
+        get() = client.auth
+
+    val postgrest: Postgrest
+        get() = client.postgrest
+
+    @Synchronized
+    fun rebuildClient() {
+        clientHolder = null
+    }
+
+    @Synchronized
+    @OptIn(SupabaseInternal::class)
+    private fun clientFor(backend: SyncBackendConfig): SupabaseClient {
+        clientHolder
+            ?.takeIf { holder -> holder.backend.hasSameConnectionIdentity(backend) }
+            ?.let { return it.client }
+
+        val userAgent = "NuvioTV/${BuildConfig.VERSION_NAME.ifBlank { "dev" }}"
+        val rateLimitCoordinator = BackendRateLimitCoordinator()
+        lateinit var client: SupabaseClient
+        client = createSupabaseClient(
+            supabaseUrl = backend.normalizedSupabaseUrl,
+            supabaseKey = backend.anonKey,
+        ) {
+            httpConfig {
+                install(WebSockets) { contentConverter = KotlinxWebsocketSerializationConverter(supabaseJson) }
+                install(BackendRateLimitPlugin) { coordinator = rateLimitCoordinator }
+                // supabase-kt retries a failed refresh only for its NETWORK_ERROR_CODES (5xx) and
+                // for failures that never reached the server. Every other failing status falls
+                // through to clearSession(), which deletes the persisted session — the box then
+                // comes back signed out with "No entry with the key sb-<ref>-session". Absorbing
+                // the transient refusals here means the library never sees them.
+                install(HttpRequestRetry) {
+                    retryIf(maxRetries = 2) { request, response ->
+                        shouldRetryAuthRefreshResponse(
+                            statusCode = response.status.value,
+                            path = request.url.encodedPath,
+                            grantType = request.url.parameters["grant_type"],
+                            server = response.headers[HttpHeaders.Server],
+                            cloudflareRay = response.headers["cf-ray"],
+                        )
+                    }
+                    // Deliberately short and few: the retry has to land inside GoTrue's
+                    // refresh-token reuse interval, and re-presenting the token after that window
+                    // trips reuse detection and revokes the whole family.
+                    constantDelay(millis = 100)
+                }
+                defaultRequest {
+                    headers.append(HttpHeaders.UserAgent, userAgent)
+                }
+            }
+            install(Auth) {
+                sessionManager = com.nuvio.tv.core.security.SecureAuthSessionManager(secureCredentials, backend.normalizedSupabaseUrl)
+                alwaysAutoRefresh = true
+                autoLoadFromStorage = true
+                autoSaveToStorage = true
+                enableLifecycleCallbacks = false
+            }
+            install(Postgrest)
+            // Backs upstream's realtime sync-invalidation service.
+            install(Realtime) {
+                // See mobile SupabaseProvider for the full rationale: the default provider force-
+                // refreshes an expired session on rejoin and throws TokenExpiredException on
+                // Realtime's own unguarded scope (-> process death), and is a SECOND refresher
+                // that trips GoTrue refresh-token reuse rotation -> spurious sign-out (auth-js#213,
+                // see AuthManager single-refresher discipline). Return the current token only;
+                // alwaysAutoRefresh keeps it fresh and propagates via setAuth.
+                accessToken = realtimeAccessToken
+                customUrl = realtimeUrl(backend.normalizedSupabaseUrl)
+                reconnectDelay = 3.seconds
+                websocketFactory = RealtimeSocketFactory { url ->
+                    KtorRealtimeWebsocketFactory(client.httpClient.httpClient).create(url)
+                }
+            }
+            // Backs upstream's cosmetic ProfileBackgroundRepository (kept inert without a member backend).
+            install(Storage)
+        }
+        clientHolder = ClientHolder(backend = backend, client = client)
+        return client
+    }
+}
+
+/**
+ * The token every Realtime channel join carries (`access_token`): the signed-in user's session JWT, read,
+ * never refreshed here (Auth's alwaysAutoRefresh is the one refresher; supabase-kt's Realtime collects
+ * Auth.sessionStatus and setAuth()s each refreshed token through this same provider). Null when signed
+ * out: supabase-kt then sends the client's API key, which Realtime treats as anon. Private channels
+ * (watch-party:<id>) authorise on this JWT. Pinned by RealtimeAccessTokenTest.
+ */
+internal val realtimeAccessToken: suspend SupabaseClient.() -> String? = { auth.currentAccessTokenOrNull() }

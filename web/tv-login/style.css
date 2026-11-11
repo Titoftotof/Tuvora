@@ -1,0 +1,10 @@
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101321;color:#f5f6fa}
+*{box-sizing:border-box}body{margin:0;padding:28px 18px}main{max-width:450px;margin:24px auto}
+.brand{color:#a59bff;letter-spacing:.25em;font-weight:800}h1{font-size:2rem}p{line-height:1.6}
+#status{padding:14px;border-radius:12px;background:#20263b;overflow-wrap:anywhere}#status.error{background:#46242d}
+label{display:block;margin:16px 0 7px}input:not([type=checkbox]){width:100%;padding:14px;font:inherit;border:1px solid #68718a;border-radius:10px;background:#181e30;color:inherit}
+button{width:100%;padding:15px;margin-top:16px;font:inherit;font-weight:650;color:#151126;background:#b7adff;border:0;border-radius:10px;cursor:pointer}
+button.secondary{background:#272e46;color:#f5f6fa}button:disabled{opacity:.5;cursor:wait}a{color:#c7c0ff}
+.check{display:flex;gap:10px;align-items:baseline;line-height:1.5}.check input{flex-shrink:0}
+.device{padding:16px;background:#20263b;border-radius:12px;font-weight:700}.footnote{color:#b0b8ce;font-size:.9rem;margin-top:28px}
+[hidden]{display:none!important}:focus-visible{outline:3px solid #dfcaff;outline-offset:4px}

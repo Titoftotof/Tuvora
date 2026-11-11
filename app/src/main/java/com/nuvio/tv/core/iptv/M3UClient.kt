@@ -1,0 +1,405 @@
+package com.nuvio.tv.core.iptv
+
+import android.util.Log
+import com.nuvio.tv.core.iptv.content.ContentChannel
+import com.nuvio.tv.core.iptv.content.ContentSeries
+import com.nuvio.tv.core.iptv.content.ContentVod
+import com.nuvio.tv.core.iptv.content.IptvContentDb
+import com.nuvio.tv.core.iptv.content.M3UFileStore
+import com.nuvio.tv.core.iptv.content.M3UKind
+import com.nuvio.tv.core.iptv.content.M3UParser
+import com.nuvio.tv.core.iptv.epg.XmltvClient
+import com.nuvio.tv.core.iptv.identity.M3uIdentity
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.BufferedReader
+import java.io.InputStream
+import java.util.zip.GZIPInputStream
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Singleton
+
+/**
+ * An [IptvClient] backed by a parsed M3U/URL playlist. Unlike Xtream there is NO API — the parsed
+ * playlist IS the catalog, so it MUST live in a DB ([IptvContentDb]) and CANNOT be held in RAM
+ * (provider lists reach 192MB / 685k entries).
+ *
+ *  - [ensureIngested] fetches the playlist URL and STREAMS it line-by-line into the DB in chunks
+ *    (never loading the whole body). Idempotent + single-flight per playlist; a fresh ingest runs
+ *    when the playlist has never been ingested or is stale.
+ *  - the query methods (liveChannels / vodMovies / series / seriesInfo) read rows back and map
+ *    them to the SAME domain models Xtream emits, so downstream (hub/search/registry/player) is
+ *    identical. Live stream URL is the M3U url directly.
+ *
+ * The playlist id used to key the DB is [XtreamAccount.id] (a stable `m3u:scheme://host/path` id
+ * from [m3uAccountFromUrl]), which is exactly the accountId the registry embeds in content ids, so
+ * ids line up end-to-end (registry -> meta/stream short-circuit -> deep-link rebuild).
+ */
+@Singleton
+class M3UClient @Inject constructor(
+    private val db: IptvContentDb,
+    @Named("m3uIngest") private val http: OkHttpClient,
+    private val fileStore: M3UFileStore,
+    private val xmltv: XmltvClient,
+    private val playlistDns: com.nuvio.tv.core.iptv.dns.PlaylistDns,
+    /** Step 0.3: the playlist download walks the playlist's backup URLs. */
+    private val failover: PlaylistServerFailover,
+) : IptvClient {
+
+    // One ingest per playlist, owned HERE rather than by whoever asked first: a second caller (an add + a
+    // first browse, the hub + the guide) awaits the same import instead of reading a half-built catalog,
+    // and a caller that stops waiting (the IPTV page's stall deadline, BoundedLoad) never cancels it.
+    private val ingestLock = Mutex()
+    private val inFlight = mutableMapOf<String, CompletableDeferred<Unit>>()
+    private val ingestJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+    private val lastFailedMs = mutableMapOf<String, Long>()
+
+    private val _catalogRebuilt = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 16)
+
+    /** B64: emits a playlist id after its catalog was (re)built under the current item ids. */
+    val catalogRebuilt: kotlinx.coroutines.flow.SharedFlow<String> = _catalogRebuilt
+
+    // Ingest outlives the browse request that triggered it (a 192MB parse takes a while and the
+    // user navigates); a cancelled request must not kill (and backoff-poison) the ingest.
+    private val ingestScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Ensures the playlist is ingested (fetch + parse + store) before a browse/search reads it.
+     * Single-flight per playlist; failures back off. Never throws — a failed ingest degrades to
+     * whatever (possibly empty) catalog exists. Force-triggered on add/edit; lazily triggered on
+     * first hub/search access if the DB has no ingest yet.
+     */
+    suspend fun ensureIngested(acc: XtreamAccount, force: Boolean = false) {
+        com.nuvio.tv.core.sources.DeviceSources.guard("iptv",acc.id)
+        val id = acc.id
+        val builtAt = db.builtAt(id)
+        // B64: a catalog built under the pre-B64 ids rebuilds once (its legacy ids are kept first) —
+        // when it can: a file playlist whose local copy is gone keeps serving what it has.
+        val idSchemeUpgrade = builtAt != null &&
+            db.idScheme(id) < M3U_ID_SCHEME && (!acc.isM3UFile() || fileStore.exists(id))
+        val stale = builtAt == null ||
+            (acc.autoRefreshHours > 0 && System.currentTimeMillis() - builtAt > acc.autoRefreshHours * 3_600_000L) ||
+            idSchemeUpgrade
+        if (!force && !stale) return
+
+        val (deferred, isOwner) = ingestLock.withLock {
+            inFlight[id]?.let { return@withLock it to false }
+            if (!force && System.currentTimeMillis() - (lastFailedMs[id] ?: 0) < BUILD_BACKOFF_MS) return
+            val d = CompletableDeferred<Unit>()
+            inFlight[id] = d
+            d to true
+        }
+
+        if (isOwner) {
+            val job = ingestScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                try {
+                    ingest(acc)
+                    ingestLock.withLock { lastFailedMs.remove(id) }
+                    // The IPTV page that gave up waiting (BoundedLoad) re-shows; failed rows ask once more.
+                    IptvImportProgress.finished(id)
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    // Cancelled = the playlist was removed (cancelIngest), not a failure to back off from.
+                    throw c
+                } catch (t: Throwable) {
+                    Log.w(TAG, "M3U ingest failed for ${acc.name}", t)
+                    ingestLock.withLock { lastFailedMs[id] = System.currentTimeMillis() }
+                } finally {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        ingestLock.withLock {
+                            inFlight.remove(id)
+                            ingestJobs.remove(id)
+                        }
+                    }
+                    deferred.complete(Unit)
+                }
+            }
+            ingestLock.withLock { ingestJobs[id] = job }
+            job.start()
+        }
+        // Stale (past the playlist's auto-refresh) but usable: serve the stored copy NOW and refresh behind
+        // it. The served generation stays readable until the new one commits (IptvContentDb's generation
+        // swap), and IptvImportProgress.finished tells the page when the fresh one lands. Waiting on the
+        // whole re-download was the auto-refresh variant of "the IPTV page never finishes loading".
+        // Not for the one-time B64 id-scheme rebuild: callers must read the new ids, so they wait for it
+        // (still bounded — the page's stall deadline runs on this import's progress ticks).
+        if (!force && builtAt != null && !idSchemeUpgrade) return
+        deferred.await()
+    }
+
+    /** Stops [accountId]'s import (the playlist was removed) so it cannot write rows for a deleted playlist. */
+    suspend fun cancelIngest(accountId: String) {
+        ingestLock.withLock { ingestJobs[accountId] }?.cancel()
+    }
+
+    /**
+     * Stream the playlist body into [IptvContentDb]. The byte source depends on the account's
+     * source type — a URL fetch ([XtreamAccount.SOURCE_URL]) or the local copy of a picked file
+     * ([XtreamAccount.SOURCE_FILE]) — but both feed the SAME [parseInto]/[M3UParser.parseStream]
+     * pipeline (reader walked ONCE, never fully materialized). After the catalog lands, refresh the
+     * EPG (throttled) so M3U live channels get real now/next.
+     */
+    private suspend fun ingest(acc: XtreamAccount) = withContext(Dispatchers.IO) {
+        // B64: before the first login-free build replaces a pre-B64 catalog, keep where its ids move —
+        // the old ordinal ids exist nowhere else (M3uLegacyIds). Re-captured on a retry; harmless.
+        val sourceReady = !acc.isM3UFile() || fileStore.exists(acc.id)
+        if (sourceReady && db.builtAt(acc.id) != null && db.idScheme(acc.id) < M3U_ID_SCHEME) {
+            val kept = db.captureLegacyIds(acc.id, if (acc.isM3UFile()) null else M3uIdentity.loginOf(acc.baseUrl))
+            Log.i(TAG, "B64: kept $kept legacy id moves for ${acc.name}")
+        }
+        val built = if (acc.isM3UFile()) ingestFromFile(acc) else { ingestFromUrl(acc); true }
+        if (built) {
+            db.setIdScheme(acc.id, M3U_ID_SCHEME)
+            _catalogRebuilt.tryEmit(acc.id)
+        }
+        // Piggyback an EPG refresh on the catalog ingest. NOT forced — a fresh add has no EPG yet so
+        // it fetches, but a frequent catalog auto-refresh (e.g. every 6h) won't blow past the ~2×/day
+        // EPG cap (refreshIfStale throttles). A catalog re-ingest resets epg_built_at (finish writes
+        // NULL) too, so an edited playlist does re-fetch its EPG. Self-scoped; never fails ingest.
+        runCatching { xmltv.refreshIfStale(acc) }
+            .onFailure { Log.w(TAG, "EPG refresh failed for ${acc.name}", it) }
+    }
+
+    /**
+     * URL source: fetch + stream. OkHttp follows redirects + transparently gunzips a gzip body by
+     * default; a per-account User-Agent (stored in acc.username) is applied when set.
+     */
+    private suspend fun ingestFromUrl(acc: XtreamAccount) {
+        // Step 0.3: the download fails over to the playlist's backup URLs — but only until the first
+        // body bytes reached the parser: rows already chunk-inserted can't be taken back, so a body
+        // that dies part-way surfaces as the failure it is instead of splicing two hosts.
+        var delivered = false
+        failover.run(acc, canRetry = { !delivered }, probe = ::failoverProbe) { a ->
+            val request = Request.Builder()
+                .url(a.baseUrl)
+                .apply { acc.username.takeIf { it.isNotBlank() }?.let { header("User-Agent", it) } }
+                .build()
+            // Fetch through the playlist's DoH resolver when it opts into one (shares the ingest pool).
+            // Step 0.3b: inside a failover race the client carries the 8 s connect timeout + header
+            // signal, and cancelling the attempt closes the socket (a blocking read never would).
+            playlistDns.clientFor(http, acc.dnsProvider).forFailoverAttempt().newCall(request).executeCancellable { resp ->
+                if (!resp.isSuccessful) throw HttpStatusException(resp.code, "HTTP ${resp.code}")
+                // charStream() decodes the (possibly gunzipped) source incrementally — no full buffer.
+                // checkNotNull: body is nullable on OkHttp 4 (playstore flavor) but not on 5 (full).
+                val reader = FirstReadFlagReader(checkNotNull(resp.body) { "empty response body" }.charStream()) {
+                    delivered = true
+                }.buffered()
+                val writer = db.ingest(acc.id) { w -> parseInto(reader, w, M3uIdentity.loginOf(acc.baseUrl), acc.id) }
+                Log.i(TAG, "ingested M3U (url) for ${acc.name}: live=${writer.liveCount} vod=${writer.vodCount} series=${writer.seriesCount}")
+            }
+        }
+    }
+
+    /**
+     * The failover race's validation probe (Step 0.3b): `GET` with `Range: bytes=0-1023` (same UA and
+     * resolver as the download), at most [M3U_PROBE_BYTES] read, then the call is CANCELLED — the socket
+     * closes even if the server ignored Range and is streaming the whole 190 MB playlist (closing an
+     * unfinished body would otherwise try to drain it). VALID = the first non-BOM/whitespace bytes are
+     * `#EXTM3U`; anything else (HTML from a parked domain, a JSON error, nothing) is
+     * [FailoverInvalidResponseException] and fails over.
+     */
+    internal suspend fun failoverProbe(a: XtreamAccount) {
+        val prefix = withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url(a.baseUrl)
+                .header("Range", "bytes=0-${M3U_PROBE_BYTES - 1}")
+                .apply { a.username.takeIf { it.isNotBlank() }?.let { header("User-Agent", it) } }
+                .build()
+            val call = playlistDns.clientFor(http, a.dnsProvider).forFailoverAttempt().newCall(request)
+            call.executeCancellable { resp ->
+                if (!resp.isSuccessful) throw HttpStatusException(resp.code, "HTTP ${resp.code}")
+                val bytes = readAtMost(resp.body?.source(), M3U_PROBE_BYTES.toLong())
+                call.cancel()   // before close(): never drain the rest of a body we will not read
+                bytes
+            }
+        }
+        FailoverProbePolicy.toFailure(FailoverProbePolicy.m3uPrefix(prefix), "M3U probe")?.let { throw it }
+    }
+
+    /**
+     * File source: stream the LOCAL copy at files/playlists/{id}.m3u through the same parser. The
+     * source document may have vanished — that's fine, the whole point of copying it in. If the
+     * local copy is ALSO missing (a file playlist synced from another device; contents aren't
+     * synced), skip cleanly: leave any prior catalog intact and let the hub show the re-import
+     * affordance (builtAt stays as-is). Gzip-aware (.gz exports) via magic-byte sniffing.
+     */
+    private suspend fun ingestFromFile(acc: XtreamAccount): Boolean {
+        val file = fileStore.fileFor(acc.id)
+        if (!file.exists() || file.length() == 0L) {
+            Log.w(TAG, "M3U file missing for ${acc.name} (${acc.fileName}) — needs re-import on this device")
+            return false
+        }
+        openMaybeGzip(fileStore.open(acc.id)).use { stream ->
+            val reader = stream.bufferedReader(Charsets.UTF_8)
+            val writer = db.ingest(acc.id) { w -> parseInto(reader, w, null, acc.id) }
+            Log.i(TAG, "ingested M3U (file) for ${acc.name}: live=${writer.liveCount} vod=${writer.vodCount} series=${writer.seriesCount}")
+        }
+        return true
+    }
+
+    /** Wrap a raw file stream in a GZIPInputStream when it starts with the gzip magic (0x1f 0x8b),
+     *  so a `.m3u.gz` export ingests transparently — mirroring OkHttp's transparent gunzip. */
+    private fun openMaybeGzip(raw: InputStream): InputStream {
+        val buffered = raw.buffered()
+        buffered.mark(2)
+        val b0 = buffered.read()
+        val b1 = buffered.read()
+        buffered.reset()
+        return if (b0 == 0x1f && b1 == 0x8b) GZIPInputStream(buffered) else buffered
+    }
+
+    /** Route each parsed entry to the DB writer. The heavy streaming walk lives in
+     *  [M3UParser.parseStream] (reader walked ONCE, never fully materialized). The #EXTM3U header's
+     *  url-tvg is captured for XMLTV EPG resolution. */
+    private fun parseInto(reader: BufferedReader, w: IptvContentDb.IngestWriter, login: M3uIdentity.Login?, accountId: String) {
+        var parsed = 0
+        M3UParser.parseStream(reader, onHeaderTvgUrl = { w.setTvgUrl(it) }) { entry ->
+            // A progress tick per PROGRESS_EVERY_ENTRIES: restarts the waiting page's stall deadline, so a
+            // big but healthy import is never cut off (BoundedLoad). Cheap: one map update per 2k rows.
+            if (++parsed % PROGRESS_EVERY_ENTRIES == 0) IptvImportProgress.tick(accountId)
+            when (val row = M3uIngestMapping.map(entry, login)) {
+                is M3uIngestRow.Channel -> w.addChannel(row.row, M3uIngestMapping.categoryName(entry.group))
+                is M3uIngestRow.Movie -> w.addVod(row.row, M3uIngestMapping.categoryName(entry.group))
+                is M3uIngestRow.Episode -> w.addEpisode(row.series, row.row, M3uIngestMapping.categoryName(entry.group))
+            }
+        }
+    }
+
+    // --- IptvClient (reads from the ingested catalog) -----------------------
+
+    override suspend fun liveCategories(acc: XtreamAccount): Result<List<XtreamCategory>> = runCatching {
+        ensureIngested(acc)
+        db.categoriesFor(acc.id, IptvContentDb.TYPE_LIVE).map { XtreamCategory(it.id, it.name) }
+    }
+
+    override suspend fun vodCategories(acc: XtreamAccount): Result<List<XtreamCategory>> = runCatching {
+        ensureIngested(acc)
+        db.categoriesFor(acc.id, IptvContentDb.TYPE_VOD).map { XtreamCategory(it.id, it.name) }
+    }
+
+    override suspend fun seriesCategories(acc: XtreamAccount): Result<List<XtreamCategory>> = runCatching {
+        ensureIngested(acc)
+        db.categoriesFor(acc.id, IptvContentDb.TYPE_SERIES).map { XtreamCategory(it.id, it.name) }
+    }
+
+    override suspend fun liveChannels(acc: XtreamAccount, categoryId: String?): Result<List<XtreamChannel>> = runCatching {
+        ensureIngested(acc)
+        db.channelsFor(acc.id, categoryId).map { it.toChannel() }
+    }
+
+    override suspend fun vodMovies(acc: XtreamAccount, categoryId: String?): Result<List<XtreamMovie>> = runCatching {
+        ensureIngested(acc)
+        db.vodFor(acc.id, categoryId).map { it.toMovie() }
+    }
+
+    override suspend fun series(acc: XtreamAccount, categoryId: String?): Result<List<XtreamSeriesItem>> = runCatching {
+        ensureIngested(acc)
+        db.seriesFor(acc.id, categoryId).map { it.toSeriesItem() }
+    }
+
+    override suspend fun seriesInfo(acc: XtreamAccount, seriesId: Int): Result<XtreamSeriesDetail> = runCatching {
+        ensureIngested(acc)
+        val header = db.seriesRow(acc.id, seriesId)
+        val episodes = db.episodesFor(acc.id, seriesId).map { e ->
+            XtreamEpisode(
+                episodeId = e.episodeSid,
+                season = e.season,
+                episodeNum = e.episodeNum,
+                title = e.title.ifBlank { "Episode ${e.episodeNum}" },
+                plot = null,
+                still = e.logo,
+                streamUrl = e.url
+            )
+        }
+        XtreamSeriesDetail(tmdbId = null, plot = null, backdrop = header?.logo, episodes = episodes)
+    }
+
+    /**
+     * Now/next for an M3U live channel, from the XMLTV EPG (if one is configured — account.epgUrl
+     * or the M3U's url-tvg header). Resolves the channel's tvg-id, then the programme spanning now +
+     * the one after. Returns empty (guide shows "No information") when the channel has no tvg-id or
+     * no EPG has been fetched. Also nudges a throttled EPG refresh so a first browse warms it.
+     */
+    override suspend fun shortEpg(acc: XtreamAccount, streamId: Int, limit: Int): Result<List<XtreamProgram>> = runCatching {
+        // Lazily ensure the EPG is present/fresh (single-flight + throttled inside XmltvClient).
+        runCatching { xmltv.refreshIfStale(acc) }
+        val now = System.currentTimeMillis()
+        // B10: by the ingest's channel map, so a channel with NO tvg-id still gets the guide its name
+        // matched (this returned empty before even looking).
+        xmltv.storedNowNext(acc, streamId, now).map { p ->
+            XtreamProgram(
+                title = p.title,
+                description = p.desc.orEmpty(),
+                startMs = p.startMs,
+                endMs = p.endMs,
+                nowPlaying = now in p.startMs until p.endMs
+            )
+        }
+    }
+
+    override suspend fun resolveStreamUrl(acc: XtreamAccount, kind: String, streamId: Int, forceFresh: Boolean): String? {
+        // URLs aren't formula-derivable for M3U (they're arbitrary provider URLs) — look them up.
+        // ([forceFresh] is meaningless here: the stored line IS the freshest URL there is.)
+        // ensureIngested so a fresh cold-start deep link can still resolve.
+        ensureIngested(acc)
+        return when (kind) {
+            "live" -> db.channelUrl(acc.id, streamId)
+            "movie" -> db.vodUrl(acc.id, streamId)
+            else -> null
+        }
+    }
+
+    private fun ContentChannel.toChannel() = XtreamChannel(
+        streamId = sid, name = name, logo = logo, epgChannelId = tvgId, categoryId = categoryId,
+        hasArchive = false, streamUrl = url
+    )
+
+    private fun ContentVod.toMovie() = XtreamMovie(
+        streamId = sid, name = name, poster = logo, categoryId = categoryId, rating = null,
+        streamUrl = url, tmdb = null, containerExtension = ext
+    )
+
+    private fun ContentSeries.toSeriesItem() = XtreamSeriesItem(
+        seriesId = sid, name = name, poster = logo, categoryId = categoryId, plot = null, rating = null
+    )
+
+    companion object {
+        /** B64: the item-id scheme this build writes (1 = pre-B64 ordinals; 2 = login-free + shared series). */
+        const val M3U_ID_SCHEME = 2
+        private const val TAG = "M3UClient"
+        private const val BUILD_BACKOFF_MS = 60 * 60 * 1000L
+        private const val PROGRESS_EVERY_ENTRIES = 2_000
+        /** The M3U validation probe reads at most this much (Step 0.3b). */
+        internal const val M3U_PROBE_BYTES = 1024
+    }
+}
+
+/**
+ * Step 0.3: a [java.io.Reader] that calls [onFirstRead] the first time real characters come through —
+ * the "has anything reached the parser yet" signal a streamed fail-over-able download needs.
+ */
+internal class FirstReadFlagReader(
+    reader: java.io.Reader,
+    private val onFirstRead: () -> Unit,
+) : java.io.FilterReader(reader) {
+    private var seen = false
+
+    override fun read(): Int = super.read().also { if (it >= 0) noteRead() }
+
+    override fun read(cbuf: CharArray, off: Int, len: Int): Int =
+        super.read(cbuf, off, len).also { if (it > 0) noteRead() }
+
+    private fun noteRead() {
+        if (!seen) {
+            seen = true
+            onFirstRead()
+        }
+    }
+}

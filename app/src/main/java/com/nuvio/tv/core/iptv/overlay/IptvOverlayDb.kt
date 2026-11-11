@@ -1,0 +1,273 @@
+package com.nuvio.tv.core.iptv.overlay
+
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * On-disk store for the IPTV personalization overlay (hide / pin / reorder / custom groups), keyed on
+ * the canon-v1 identity so it matches the ids the website + phone/desktop write. Profile-scoped, sparse.
+ * TV twin of NuvioMobile's IptvOverlayStore — framework SQLiteOpenHelper (the IptvContentDb pattern),
+ * not androidx.sqlite. updated_at + deleted are the delta-sync affordance; reads ignore deleted=1.
+ */
+@Singleton
+class IptvOverlayDb @Inject constructor(@ApplicationContext context: Context) {
+
+    private val helper = object : SQLiteOpenHelper(context, "iptv_overlay.db", null, 2) {
+        override fun onCreate(db: SQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE channel_overlay(profile_id INTEGER NOT NULL, entity_id TEXT NOT NULL, playlist_id TEXT, " +
+                    "hidden INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, position INTEGER, rename TEXT, " +
+                    "updated_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0, " +
+                    "PRIMARY KEY(profile_id, entity_id)) WITHOUT ROWID",
+            )
+            db.execSQL("CREATE INDEX channel_overlay_pl ON channel_overlay(profile_id, playlist_id)")
+            db.execSQL(
+                "CREATE TABLE category_overlay(profile_id INTEGER NOT NULL, playlist_id TEXT NOT NULL, content_type TEXT NOT NULL, " +
+                    "category_key TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, position INTEGER, " +
+                    "rename TEXT, updated_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0, " +
+                    "PRIMARY KEY(profile_id, playlist_id, content_type, category_key)) WITHOUT ROWID",
+            )
+            db.execSQL(
+                "CREATE TABLE custom_group(profile_id INTEGER NOT NULL, group_id TEXT NOT NULL, playlist_id TEXT, content_type TEXT NOT NULL, " +
+                    "name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0, " +
+                    "PRIMARY KEY(profile_id, group_id)) WITHOUT ROWID",
+            )
+            db.execSQL(
+                "CREATE TABLE custom_group_member(profile_id INTEGER NOT NULL, group_id TEXT NOT NULL, entity_id TEXT NOT NULL, " +
+                    "position INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0, " +
+                    "PRIMARY KEY(profile_id, group_id, entity_id)) WITHOUT ROWID",
+            )
+            db.execSQL("CREATE TABLE overlay_cursor(profile_id INTEGER NOT NULL PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID")
+        }
+
+        // F14 (lane G): the manual guide-channel pick table is created on OPEN (IF NOT EXISTS) rather
+        // than through a version bump, so it can never collide with another lane's overlay migration.
+        override fun onOpen(db: SQLiteDatabase) {
+            super.onOpen(db)
+            db.execSQL(EPG_OVERRIDE_DDL)
+        }
+
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            // v2: `dirty` marks locally-edited rows still to be pushed, so a push sends only the delta
+            // instead of the whole overlay set on every edit (2026-09-19 write-amplification). Add the
+            // column in place — do NOT drop the tables (that would lose the user's customizations). Any
+            // pre-v2 row defaults dirty=0: it was already force-pushed by the old full-set path.
+            if (oldVersion < 2) {
+                for (t in listOf("channel_overlay", "category_overlay", "custom_group", "custom_group_member")) {
+                    runCatching { db.execSQL("ALTER TABLE $t ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0") }
+                }
+            }
+        }
+    }
+
+    private val db get() = helper.writableDatabase
+
+    @Synchronized
+    fun snapshot(profileId: Int): OverlaySnapshot {
+        val channels = HashMap<String, ChannelOverlay>()
+        db.rawQuery("SELECT entity_id, hidden, pinned, position, rename FROM channel_overlay WHERE profile_id=? AND deleted=0", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) channels[c.getString(0)] = ChannelOverlay(c.getInt(1) != 0, c.getInt(2) != 0, if (c.isNull(3)) null else c.getInt(3), if (c.isNull(4)) null else c.getString(4))
+        }
+        val categories = HashMap<String, CategoryOverlay>()
+        db.rawQuery("SELECT category_key, hidden, pinned, position, rename FROM category_overlay WHERE profile_id=? AND deleted=0", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) categories[c.getString(0)] = CategoryOverlay(c.getInt(1) != 0, c.getInt(2) != 0, if (c.isNull(3)) null else c.getInt(3), if (c.isNull(4)) null else c.getString(4))
+        }
+        val members = HashMap<String, MutableList<Pair<Int, String>>>()
+        db.rawQuery("SELECT group_id, entity_id, position FROM custom_group_member WHERE profile_id=? AND deleted=0", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) members.getOrPut(c.getString(0)) { mutableListOf() }.add(c.getInt(2) to c.getString(1))
+        }
+        val groups = ArrayList<CustomGroup>()
+        db.rawQuery("SELECT group_id, playlist_id, content_type, name, position FROM custom_group WHERE profile_id=? AND deleted=0", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) {
+                val gid = c.getString(0)
+                groups.add(CustomGroup(gid, c.getString(2), if (c.isNull(1)) null else c.getString(1), c.getString(3), c.getInt(4), members[gid]?.sortedBy { it.first }?.map { it.second } ?: emptyList()))
+            }
+        }
+        return OverlaySnapshot(channels, categories, groups)
+    }
+
+    @Synchronized
+    fun setChannel(profileId: Int, entityId: String, playlistId: String?, o: ChannelOverlay, updatedAt: Long, deletedOverride: Boolean? = null) {
+        // The pull path reuses this setter (deletedOverride != null): a remote apply is not a local
+        // edit, so it stays dirty=0 (never pushed back) and only wins under LWW (>= stored updated_at).
+        val remote = deletedOverride != null
+        val deleted = deletedOverride ?: o.isNoop
+        val dirty = if (remote) 0 else 1
+        val lww = if (remote) " WHERE excluded.updated_at >= channel_overlay.updated_at" else ""
+        db.execSQL(
+            "INSERT INTO channel_overlay(profile_id, entity_id, playlist_id, hidden, pinned, position, rename, updated_at, deleted, dirty) VALUES(?,?,?,?,?,?,?,?,?,?) " +
+                "ON CONFLICT(profile_id, entity_id) DO UPDATE SET playlist_id=excluded.playlist_id, hidden=excluded.hidden, pinned=excluded.pinned, " +
+                "position=excluded.position, rename=excluded.rename, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=$dirty$lww",
+            arrayOf<Any?>(profileId, entityId, playlistId, if (o.hidden) 1 else 0, if (o.pinned) 1 else 0, o.position, o.rename, updatedAt, if (deleted) 1 else 0, dirty),
+        )
+    }
+
+    @Synchronized
+    fun setCategory(profileId: Int, playlistId: String, contentType: String, categoryKey: String, o: CategoryOverlay, updatedAt: Long, deletedOverride: Boolean? = null) {
+        val remote = deletedOverride != null
+        val deleted = deletedOverride ?: o.isNoop
+        val dirty = if (remote) 0 else 1
+        val lww = if (remote) " WHERE excluded.updated_at >= category_overlay.updated_at" else ""
+        db.execSQL(
+            "INSERT INTO category_overlay(profile_id, playlist_id, content_type, category_key, hidden, pinned, position, rename, updated_at, deleted, dirty) VALUES(?,?,?,?,?,?,?,?,?,?,?) " +
+                "ON CONFLICT(profile_id, playlist_id, content_type, category_key) DO UPDATE SET hidden=excluded.hidden, pinned=excluded.pinned, position=excluded.position, " +
+                "rename=excluded.rename, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=$dirty$lww",
+            arrayOf<Any?>(profileId, playlistId, contentType, categoryKey, if (o.hidden) 1 else 0, if (o.pinned) 1 else 0, o.position, o.rename, updatedAt, if (deleted) 1 else 0, dirty),
+        )
+    }
+
+    /**
+     * Drop a removed playlist's channel + category overlay for one profile (custom groups may span
+     * playlists — left alone). A hard local delete, not a tombstone: nothing is pushed, so the server
+     * copy survives for the user's other devices. Twin of NuvioMobile's IptvOverlayStore.purgePlaylist.
+     */
+    @Synchronized
+    fun purgePlaylist(profileId: Int, playlistId: String) {
+        val args = arrayOf(profileId.toString(), playlistId)
+        db.delete("channel_overlay", "profile_id = ? AND playlist_id = ?", args)
+        db.delete("category_overlay", "profile_id = ? AND playlist_id = ?", args)
+        db.delete("epg_override", "profile_id = ? AND playlist_id = ?", args)
+    }
+
+    // ---- F14: manual guide-channel picks (overlay kind "epg") ------------------------------------
+
+    /** A local pick; a null [guideId] clears it (tombstone, pushed as a delete). */
+    @Synchronized
+    fun setEpgOverride(profileId: Int, entityId: String, playlistId: String?, guideId: String?, guideName: String?, updatedAt: Long) =
+        db.execSQL(
+            "INSERT INTO epg_override(profile_id, entity_id, playlist_id, guide_id, guide_name, updated_at, deleted, dirty) VALUES(?,?,?,?,?,?,?,1) " +
+                "ON CONFLICT(profile_id, entity_id) DO UPDATE SET playlist_id=excluded.playlist_id, guide_id=excluded.guide_id, " +
+                "guide_name=excluded.guide_name, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=1",
+            arrayOf<Any?>(profileId, entityId, playlistId, guideId, guideName, updatedAt, if (guideId.isNullOrBlank()) 1 else 0),
+        )
+
+    /** A pulled pick (another device / the web). LWW-guarded like every other kind. */
+    @Synchronized
+    fun applyRemoteEpg(profileId: Int, entityId: String, playlistId: String?, guideId: String?, guideName: String?, updatedAt: Long, deleted: Boolean) =
+        db.execSQL(
+            "INSERT INTO epg_override(profile_id, entity_id, playlist_id, guide_id, guide_name, updated_at, deleted) VALUES(?,?,?,?,?,?,?) " +
+                "ON CONFLICT(profile_id, entity_id) DO UPDATE SET playlist_id=excluded.playlist_id, guide_id=excluded.guide_id, " +
+                "guide_name=excluded.guide_name, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=0 " +
+                "WHERE excluded.updated_at >= epg_override.updated_at",
+            arrayOf<Any?>(profileId, entityId, playlistId, guideId, guideName, updatedAt, if (deleted || guideId.isNullOrBlank()) 1 else 0),
+        )
+
+    /** One profile's picks for a playlist: entity id -> guide channel id. */
+    @Synchronized
+    fun epgOverrides(profileId: Int, playlistId: String): Map<String, String> =
+        db.rawQuery(
+            "SELECT entity_id, guide_id FROM epg_override WHERE profile_id=? AND playlist_id=? AND deleted=0 AND guide_id IS NOT NULL",
+            arrayOf(profileId.toString(), playlistId),
+        ).use { c -> buildMap { while (c.moveToNext()) put(c.getString(0), c.getString(1)) } }
+
+    /** Every guide id ANY profile picked for a playlist — the ingest keeps those programmes. */
+    @Synchronized
+    fun epgOverrideGuideIds(playlistId: String): Set<String> =
+        db.rawQuery(
+            "SELECT DISTINCT guide_id FROM epg_override WHERE playlist_id=? AND deleted=0 AND guide_id IS NOT NULL",
+            arrayOf(playlistId),
+        ).use { c -> buildSet { while (c.moveToNext()) add(c.getString(0)) } }
+
+    @Synchronized fun getCursor(profileId: Int): Long =
+        db.rawQuery("SELECT cursor FROM overlay_cursor WHERE profile_id=?", arrayOf(profileId.toString())).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+
+    @Synchronized fun setCursor(profileId: Int, cursor: Long) =
+        db.execSQL("INSERT INTO overlay_cursor(profile_id, cursor) VALUES(?,?) ON CONFLICT(profile_id) DO UPDATE SET cursor=excluded.cursor", arrayOf<Any?>(profileId, cursor))
+
+    @Synchronized
+    fun applyRemoteGroup(profileId: Int, groupId: String, playlistId: String?, contentType: String, name: String, position: Int, updatedAt: Long, deleted: Boolean) =
+        db.execSQL(
+            "INSERT INTO custom_group(profile_id, group_id, playlist_id, content_type, name, position, updated_at, deleted) VALUES(?,?,?,?,?,?,?,?) " +
+                "ON CONFLICT(profile_id, group_id) DO UPDATE SET playlist_id=excluded.playlist_id, content_type=excluded.content_type, name=excluded.name, position=excluded.position, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=0 WHERE excluded.updated_at >= custom_group.updated_at",
+            arrayOf<Any?>(profileId, groupId, playlistId, contentType, name, position, updatedAt, if (deleted) 1 else 0),
+        )
+
+    @Synchronized
+    fun applyRemoteMember(profileId: Int, groupId: String, entityId: String, position: Int, updatedAt: Long, deleted: Boolean) =
+        db.execSQL(
+            "INSERT INTO custom_group_member(profile_id, group_id, entity_id, position, updated_at, deleted) VALUES(?,?,?,?,?,?) " +
+                "ON CONFLICT(profile_id, group_id, entity_id) DO UPDATE SET position=excluded.position, updated_at=excluded.updated_at, deleted=excluded.deleted, dirty=0 WHERE excluded.updated_at >= custom_group_member.updated_at",
+            arrayOf<Any?>(profileId, groupId, entityId, position, updatedAt, if (deleted) 1 else 0),
+        )
+
+    /**
+     * Channel rows the device still owes the server: only rows dirtied since the last successful push
+     * (each edit sets dirty=1; [markChannelsPushed] clears it on ack). Pushing every row on each edit
+     * is what caused the 2026-09-19 write-amplification.
+     */
+    @Synchronized
+    fun channelRowsForPush(profileId: Int): List<OverlayPushRow> {
+        val out = ArrayList<OverlayPushRow>()
+        db.rawQuery("SELECT entity_id, playlist_id, hidden, pinned, position, rename, updated_at, deleted FROM channel_overlay WHERE profile_id=? AND dirty=1", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) {
+                val v = buildString {
+                    append("{\"hidden\":").append(c.getInt(2) != 0).append(",\"pinned\":").append(c.getInt(3) != 0)
+                    if (!c.isNull(4)) append(",\"position\":").append(c.getInt(4))
+                    if (!c.isNull(5)) append(",\"rename\":\"").append(c.getString(5).replace("\\", "\\\\").replace("\"", "\\\"")).append("\"")
+                    append("}")
+                }
+                out.add(OverlayPushRow("channel", c.getString(0), if (c.isNull(1)) null else c.getString(1), v, c.getLong(6), c.getInt(7) != 0))
+            }
+        }
+        // Category edits made on this TV (F02 "Hide group"): same delta, in the website's value shape,
+        // which carries the content type the server's category row needs.
+        db.rawQuery("SELECT category_key, playlist_id, content_type, hidden, pinned, position, rename, updated_at, deleted FROM category_overlay WHERE profile_id=? AND dirty=1", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) {
+                val v = buildString {
+                    append("{\"content_type\":\"").append(c.getString(2).jsonEscaped()).append("\"")
+                    append(",\"hidden\":").append(c.getInt(3) != 0).append(",\"pinned\":").append(c.getInt(4) != 0)
+                    if (!c.isNull(5)) append(",\"position\":").append(c.getInt(5))
+                    if (!c.isNull(6)) append(",\"rename\":\"").append(c.getString(6).jsonEscaped()).append("\"")
+                    append("}")
+                }
+                out.add(OverlayPushRow("category", c.getString(0), c.getString(1), v, c.getLong(7), c.getInt(8) != 0))
+            }
+        }
+        // F14 manual guide picks: same delta discipline.
+        db.rawQuery("SELECT entity_id, playlist_id, guide_id, guide_name, updated_at, deleted FROM epg_override WHERE profile_id=? AND dirty=1", arrayOf(profileId.toString())).use { c ->
+            while (c.moveToNext()) {
+                val v = buildString {
+                    append("{")
+                    if (!c.isNull(2)) append("\"guide_id\":\"").append(c.getString(2).jsonEscaped()).append("\"")
+                    if (!c.isNull(3)) append(if (c.isNull(2)) "" else ",").append("\"guide_name\":\"").append(c.getString(3).jsonEscaped()).append("\"")
+                    append("}")
+                }
+                out.add(OverlayPushRow(EPG_KIND, c.getString(0), if (c.isNull(1)) null else c.getString(1), v, c.getLong(4), c.getInt(5) != 0))
+            }
+        }
+        return out
+    }
+
+    private fun String.jsonEscaped() = replace("\\", "\\\\").replace("\"", "\\\"")
+
+    /**
+     * Clear the dirty flag for exactly the channel and category rows the server just acked — matched by entity_id
+     * AND the pushed updated_at, so a row re-edited during the push (newer updated_at) stays dirty and
+     * is re-sent next time instead of being dropped.
+     */
+    @Synchronized
+    fun markChannelsPushed(profileId: Int, rows: List<OverlayPushRow>) {
+        for (r in rows) {
+            val sql = when (r.kind) {
+                "channel" -> "UPDATE channel_overlay SET dirty=0 WHERE profile_id=? AND entity_id=? AND updated_at=? AND dirty=1"
+                "category" -> "UPDATE category_overlay SET dirty=0 WHERE profile_id=? AND category_key=? AND updated_at=? AND dirty=1"
+                EPG_KIND -> "UPDATE epg_override SET dirty=0 WHERE profile_id=? AND entity_id=? AND updated_at=? AND dirty=1"
+                else -> continue
+            }
+            db.execSQL(sql, arrayOf<Any?>(profileId, r.okey, r.updatedAt))
+        }
+    }
+
+    companion object {
+        /** Overlay kind of a manual guide pick (F14) — the same string the KMP clients and the web use. */
+        const val EPG_KIND = "epg"
+        private const val EPG_OVERRIDE_DDL =
+            "CREATE TABLE IF NOT EXISTS epg_override(profile_id INTEGER NOT NULL, entity_id TEXT NOT NULL, playlist_id TEXT, " +
+                "guide_id TEXT, guide_name TEXT, updated_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, " +
+                "dirty INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(profile_id, entity_id)) WITHOUT ROWID"
+    }
+}

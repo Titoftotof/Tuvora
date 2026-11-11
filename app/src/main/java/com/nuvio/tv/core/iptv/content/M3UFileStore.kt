@@ -1,0 +1,99 @@
+package com.nuvio.tv.core.iptv.content
+
+import android.content.Context
+import android.net.Uri
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Owns the on-disk copy of a **file** M3U playlist (sourceType = SOURCE_FILE). When the user picks
+ * a document we stream its bytes into `files/playlists/{hash}.m3u` so browsing/playback no longer
+ * depends on the original file (which can be moved/deleted, or is a transient SAF content:// uri).
+ * [M3UClient] then ingests from this local copy exactly like it ingests a URL body — same parser,
+ * same content DB.
+ *
+ * The filename is a hash of the playlist id (ids are `file:{uuid}`, already safe, but hashing keeps
+ * a bounded, always-valid filename regardless of the id scheme). Gzip-aware reading is handled by
+ * the ingest path (it sniffs the magic bytes), so we store the raw bytes verbatim here.
+ */
+@Singleton
+class M3UFileStore internal constructor(
+    private val context: Context,
+    private val codec: com.nuvio.tv.core.security.LocalSecretCodec
+) {
+    @Inject constructor(@ApplicationContext context: Context) : this(context, com.nuvio.tv.core.security.LocalSecretCodec(context))
+
+    fun open(playlistId: String): java.io.InputStream {
+        val file = fileFor(playlistId)
+        return if (file.exists() && codec.isEncrypted(file)) {
+            codec.readEncrypted(file.inputStream())
+        } else {
+            file.inputStream()
+        }
+    }
+
+    private fun dir(): File = File(context.filesDir, DIR).apply { if (!exists()) mkdirs() }
+
+    /** The local copy for a playlist id (may or may not exist — call [exists]). */
+    fun fileFor(playlistId: String): File = File(dir(), fileName(playlistId))
+
+    /** True once a local copy has been imported on THIS device. */
+    fun exists(playlistId: String): Boolean = fileFor(playlistId).let { it.exists() && it.length() > 0 }
+
+    /**
+     * Copy the picked document's bytes into the playlist's local file, streaming (never buffering
+     * the whole thing — an M3U can be large). Returns the destination file on success, throws on an
+     * unreadable uri / write failure (the caller surfaces it). The temp-then-rename keeps a failed
+     * copy from leaving a truncated file that would read as "imported".
+     */
+    suspend fun importFrom(playlistId: String, uri: Uri): File = withContext(Dispatchers.IO) {
+        val dest = fileFor(playlistId)
+        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        context.contentResolver.openInputStream(uri).use { input ->
+            checkNotNull(input) { "Cannot open the picked file" }
+            java.io.FileOutputStream(tmp).use { out ->
+                input.copyTo(out)
+                out.fd.sync()
+            }
+        }
+        check(tmp.renameTo(dest)) { "Could not save the imported file" }
+        dest
+    }
+
+    suspend fun secureExistingFiles() = withContext(Dispatchers.IO) {
+        // No-op: M3U playlist files are kept unencrypted in normal storage
+    }
+
+    /** Remove a playlist's local copy (on account delete). */
+    suspend fun delete(playlistId: String) = withContext(Dispatchers.IO) {
+        fileFor(playlistId).delete()
+        Unit
+    }
+
+    /**
+     * Step 0 — moves [oldId]'s local copy to [newId]'s path (a playlist re-keyed onto its server key
+     * keeps its bytes). No-op when [oldId] has no copy; an existing copy at [newId] is replaced.
+     */
+    suspend fun move(oldId: String, newId: String) = withContext(Dispatchers.IO) {
+        val from = fileFor(oldId)
+        if (!from.exists()) return@withContext
+        val to = fileFor(newId)
+        if (to.exists()) to.delete()
+        check(from.renameTo(to)) { "Could not move the playlist file" }
+    }
+
+    private fun fileName(playlistId: String): String {
+        // A stable, filesystem-safe name derived from the id. SHA-256 hex is always valid.
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(playlistId.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) } + ".m3u"
+    }
+
+    companion object {
+        private const val DIR = "playlists"
+    }
+}

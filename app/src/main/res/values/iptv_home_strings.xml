@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+    <string name="iptv_home_categories_title">Home IPTV categories</string>
+    <string name="iptv_home_categories_hint">Choose providers and movie or series categories. Changes are saved immediately.</string>
+    <string name="iptv_home_loading">Loading…</string>
+    <string name="iptv_home_movies">Movies</string>
+    <string name="iptv_home_series">Series</string>
+    <string name="iptv_home_filter">Filter categories</string>
+    <string name="iptv_home_empty">No categories found</string>
+    <string name="iptv_home_no_provider">Add or enable an IPTV provider first.</string>
+    <string name="iptv_home_order">Order selected categories</string>
+    <string name="iptv_home_move_up">Move up</string>
+    <string name="iptv_home_move_down">Move down</string>
+    <string name="iptv_home_remove">Remove</string>
+    <string name="iptv_home_back">Back</string>
+    <string name="iptv_home_save_failed">Unable to save. Please try again.</string>
+</resources>

@@ -1,0 +1,2165 @@
+package com.nuvio.tv.ui.screens.settings
+
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.view.KeyEvent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.graphics.Color
+import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.tv.material3.Border
+import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import com.nuvio.tv.R
+import com.nuvio.tv.ui.screens.detail.requestFocusAfterFrames
+import com.nuvio.tv.core.iptv.XtreamAccount
+import com.nuvio.tv.core.iptv.PlaylistFormSubmitPolicy
+import com.nuvio.tv.core.iptv.isXtream
+import com.nuvio.tv.core.iptv.parseXtreamAccount
+import com.nuvio.tv.ui.components.NuvioDialog
+import com.nuvio.tv.ui.screens.iptv.ContactDialog
+import com.nuvio.tv.ui.screens.iptv.HoldConfirmDialog
+import com.nuvio.tv.ui.screens.iptv.PlaylistDetailsScreen
+import com.nuvio.tv.ui.screens.iptv.PlaylistDetailsState
+import com.nuvio.tv.ui.screens.account.InputFieldKeys
+import com.nuvio.tv.ui.theme.NuvioTheme
+import kotlinx.coroutines.launch
+
+/**
+ * Xtream IPTV accounts settings (inline section, like Debrid). Single paste field:
+ * the user pastes their portal/M3U URL, we verify it live, then it's saved.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun XtreamSettingsContent(
+    viewModel: XtreamSettingsViewModel = hiltViewModel(),
+    onPairFromPhone: () -> Unit = {},
+    onEnterSetupCode: () -> Unit = {},
+    initialFocusRequester: FocusRequester? = null,
+    openAddOnEntry: Boolean = false
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val indexingAccounts by viewModel.indexingAccounts.collectAsStateWithLifecycle()
+    val indexProgress by viewModel.indexProgress.collectAsStateWithLifecycle()
+    val epgRegions by viewModel.epgRegions.collectAsStateWithLifecycle()
+    val selectedEpgRegions by viewModel.selectedEpgRegions.collectAsStateWithLifecycle()
+    // Step 0.3: playlists currently served by a backup server ("Using backup server N").
+    val activeServers by viewModel.activeServers.collectAsStateWithLifecycle()
+    // Step 2: provider-managed playlists, by key.
+    val managedInfos by viewModel.managedInfos.collectAsStateWithLifecycle()
+    val pendingDetails by viewModel.pendingDetails.collectAsStateWithLifecycle()
+    var showRegionPicker by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(openAddOnEntry) }
+    // Step 2: the details PAGE is open for this playlist id (looked up live, so toggles re-render it).
+    var actionsForId by remember { mutableStateOf<String?>(null) }
+    // Step 2: "<provider> added this playlist", shown on the page until it is closed (after a redeem).
+    var justAddedBy by remember { mutableStateOf<String?>(null) }
+    var contactFor by remember { mutableStateOf<String?>(null) }
+    var detachFor by remember { mutableStateOf<String?>(null) }
+    // Step 2: after a Detach, "Detached from <provider>" on that playlist's page until the page is closed.
+    var detachedFrom by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var catchUpFor by remember { mutableStateOf<String?>(null) }
+    // Lane G: the "Guide & channel names" card, its tag editor and the guide-assign flow.
+    var guideFor by remember { mutableStateOf<String?>(null) }
+    var tagsFor by remember { mutableStateOf<String?>(null) }
+    var assignFor by remember { mutableStateOf<String?>(null) }
+    var rematchStarted by remember { mutableStateOf(setOf<String>()) }
+    // B57: Remove used to delete on the first OK with no confirmation, from a row that was cut off
+    // the bottom of a non-scrolling dialog.
+    var removeConfirmFor by remember { mutableStateOf<XtreamAccount?>(null) }
+    var hiddenFor by remember { mutableStateOf<XtreamAccount?>(null) }
+    var correctionFor by remember { mutableStateOf<String?>(null) }
+    var guideOffsetFor by remember { mutableStateOf<String?>(null) }
+    var editFor by remember { mutableStateOf<XtreamAccount?>(null) }
+    // Content & Categories: track ids (not snapshots) so the dialogs always render the
+    // freshest account from the store after each toggle.
+    var contentForId by remember { mutableStateOf<String?>(null) }
+    var checklistType by remember { mutableStateOf<String?>(null) }
+    // UX74: the remove confirm only promises an all-devices delete when this TV syncs.
+    val signedIn by viewModel.signedIn.collectAsStateWithLifecycle()
+    // UX79: a confirmed remove (id + its row index) until the row is gone — then say so and keep
+    // focus in the list (the removed row's focus used to fall out to the side menu).
+    var pendingRemoval by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    val ownAddRowFocus = remember { FocusRequester() }
+    val addRowFocus = initialFocusRequester ?: ownAddRowFocus
+    val accountRowFocus = remember { mutableMapOf<String, FocusRequester>() }
+    val context = LocalContext.current
+    val playlistRemovedText = stringResource(R.string.iptv_playlist_removed)
+    // The focus hand-off runs in this scope, not in the effect below: clearing pendingRemoval (one
+    // of the effect's own keys) restarts the effect on the next frame, which cancelled the old
+    // coroutine inside requestFocusAfterFrames' frame wait — the toast showed but the request never
+    // ran, and focus stayed wherever the removed row's loss had dropped it (the side menu).
+    val removalFocusScope = rememberCoroutineScope()
+    LaunchedEffect(pendingRemoval, uiState.accounts) {
+        val (removedId, removedIndex) = pendingRemoval ?: return@LaunchedEffect
+        if (uiState.accounts.any { it.id == removedId }) return@LaunchedEffect
+        accountRowFocus.remove(removedId)
+        val target = PlaylistRemovalUiPolicy.focusIndexAfterRemoval(removedIndex, uiState.accounts.size)
+            ?.let { uiState.accounts.getOrNull(it) }
+            ?.let { accountRowFocus[it.id] }
+            ?: addRowFocus
+        pendingRemoval = null
+        android.widget.Toast.makeText(context, playlistRemovedText, android.widget.Toast.LENGTH_SHORT).show()
+        removalFocusScope.launch { target.requestFocusAfterFrames() }
+    }
+
+    // Step 2: a setup code just added a playlist: open its details page (once the pull has applied it).
+    LaunchedEffect(pendingDetails, uiState.accounts) {
+        val request = pendingDetails ?: return@LaunchedEffect
+        val target = uiState.accounts.firstOrNull { it.id == request.playlistKey }
+        when (com.nuvio.tv.ui.screens.iptv.PlaylistDetailsRequests.decide(request, target != null, System.currentTimeMillis())) {
+            com.nuvio.tv.ui.screens.iptv.PlaylistDetailsRequests.Decision.OPEN -> {
+                actionsForId = target?.id
+                justAddedBy = request.addedBy
+                viewModel.consumePendingDetails()
+            }
+            com.nuvio.tv.ui.screens.iptv.PlaylistDetailsRequests.Decision.DROP -> viewModel.consumePendingDetails()
+            com.nuvio.tv.ui.screens.iptv.PlaylistDetailsRequests.Decision.WAIT -> Unit
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(NuvioTheme.spacing.xl)
+    ) {
+        Text(
+            text = stringResource(R.string.iptv_settings_title),
+            style = MaterialTheme.typography.titleLarge,
+            color = NuvioTheme.colors.TextPrimary
+        )
+        Text(
+            text = "Paste your IPTV portal or M3U URL to add a provider.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = NuvioTheme.colors.TextSecondary,
+            modifier = Modifier.padding(top = NuvioTheme.spacing.xs, bottom = NuvioTheme.spacing.md)
+        )
+
+        SettingsActionRow(
+            title = "Add IPTV account",
+            subtitle = "Paste a portal / M3U URL",
+            onClick = { showAddDialog = true },
+            leadingIcon = Icons.Default.Add,
+            modifier = Modifier.focusRequester(addRowFocus)
+        )
+
+        // Pair from a phone: typing on a TV remote is painful (and the TV may not be signed in),
+        // so this opens a QR + code the user enters a playlist against on their phone (P5).
+        SettingsActionRow(
+            title = stringResource(R.string.iptv_pairing_entry_title),
+            subtitle = stringResource(R.string.iptv_pairing_entry_subtitle),
+            onClick = onPairFromPhone,
+            leadingIcon = Icons.Default.PhoneAndroid
+        )
+
+        // Step 2: a provider's setup code, typed here or redeemed on a phone.
+        SettingsActionRow(
+            title = stringResource(R.string.iptv_setup_entry_title),
+            subtitle = stringResource(R.string.iptv_setup_entry_subtitle),
+            onClick = onEnterSetupCode,
+            leadingIcon = Icons.Default.VpnKey
+        )
+
+        IptvHomeSettingsEntry()
+
+        SettingsActionRow(
+            title = "Guide regions",
+            subtitle = "Choose which countries' EPG this device keeps",
+            value = epgRegionSummaryValue(selectedEpgRegions, epgRegions),
+            onClick = { showRegionPicker = true },
+            leadingIcon = Icons.Default.Public
+        )
+
+        uiState.accounts.forEach { account ->
+            // Lazily fetch "Active · 0/1 connections · Expires …" for the row (silent on failure),
+            // and the read-only guide EPG coverage line (mirror mapping + session source tally).
+            LaunchedEffect(account.id) {
+                viewModel.ensureAccountStatus(account)
+                viewModel.ensureGuideEpgCoverage(account)
+            }
+            // Step 2: "Managed by <provider> · N days left" (the days only when the provider reports an expiry).
+            val managedLine = managedInfos[account.id]?.let { m ->
+                val expiry = com.nuvio.tv.core.iptv.ManagedDetailsModel.expiry(uiState.accountInfo[account.id], System.currentTimeMillis() / 1000)
+                if (expiry is com.nuvio.tv.core.iptv.ManagedDetailsModel.Expiry.Days) {
+                    stringResource(
+                        R.string.iptv_managed_row_line_days, m.providerName,
+                        androidx.compose.ui.res.pluralStringResource(R.plurals.iptv_details_days_left, expiry.daysLeft, expiry.daysLeft),
+                    )
+                } else stringResource(R.string.iptv_managed_row_line, m.providerName)
+            }
+            SettingsActionRow(
+                title = com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.displayName(account.name),
+                subtitle = listOfNotNull(
+                    managedLine,
+                    // Step 0.3: say which server is actually answering when it isn't the main one.
+                    activeServers[account.id]?.let { n ->
+                        account.backupUrls?.getOrNull(n - 1)?.let { address ->
+                            stringResource(R.string.iptv_using_backup_server_host, n,
+                                com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(address))
+                        } ?: stringResource(R.string.iptv_using_backup_server, n)
+                    }
+                        // T7: an M3U link carries the login — never on screen.
+                        ?: com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(account.baseUrl),
+                    // B60: an edit saved although the provider check failed says so on its row.
+                    uiState.saveWarnings[account.id],
+                    com.nuvio.tv.core.iptv.match.indexingStatusLine(
+                        isIndexing = account.id in indexingAccounts,
+                        progress = indexProgress[account.id],
+                    ),
+                    uiState.accountStatus[account.id],
+                    uiState.guideEpgCoverage[account.id]
+                ).joinToString("\n"),
+                value = if (account.enabled) "On" else "Off",
+                onClick = { actionsForId = account.id },
+                modifier = Modifier.focusRequester(accountRowFocus.getOrPut(account.id) { FocusRequester() })
+            )
+        }
+    }
+
+    if (showRegionPicker) {
+        EpgRegionPickerDialog(
+            regions = epgRegions,
+            initiallySelected = selectedEpgRegions,
+            onApply = {
+                viewModel.setEpgRegions(it)
+                showRegionPicker = false
+            },
+            onDismiss = { showRegionPicker = false },
+        )
+    }
+
+    if (showAddDialog) {
+        XtreamAddDialog(
+            isValidating = uiState.isValidating,
+            error = uiState.error,
+            onSubmitUrl = { url, options -> viewModel.addFromUrl(url, name = null, options = options) { showAddDialog = false } },
+            onSubmitManual = { server, user, pass, name, options ->
+                viewModel.addManual(server, user, pass, name, options) { showAddDialog = false }
+            },
+            onSubmitM3U = { playlistUrl, userAgent, name, options ->
+                viewModel.addM3UUrl(playlistUrl, userAgent, name, options) { showAddDialog = false }
+            },
+            onSubmitFile = { uri, fileName, name, options ->
+                viewModel.addM3UFile(uri, fileName, name, options) { showAddDialog = false }
+            },
+            onSubmitStalker = { fields, name, options ->
+                viewModel.addStalker(fields, name, options) { showAddDialog = false }
+            },
+            onDismiss = {
+                viewModel.clearError()
+                showAddDialog = false
+            }
+        )
+    }
+
+    editFor?.let { account ->
+        XtreamAddDialog(
+            isValidating = uiState.isValidating,
+            error = uiState.error,
+            initial = account,
+            onSubmitUrl = { url, options -> viewModel.editFromUrl(account, url, options) { editFor = null } },
+            onSubmitManual = { server, user, pass, name, options ->
+                viewModel.editManual(account, server, user, pass, name, options) { editFor = null }
+            },
+            onSubmitM3U = { playlistUrl, userAgent, _, options ->
+                viewModel.editM3UUrl(account, playlistUrl, userAgent, options) { editFor = null }
+            },
+            onSubmitFile = { uri, fileName, _, _ ->
+                // Editing a file playlist = re-pick its file (same id, keeps saved content/options).
+                viewModel.addM3UFile(uri, fileName, name = null, reimportFor = account) { editFor = null }
+            },
+            onSubmitStalker = { fields, name, options ->
+                viewModel.editStalker(account, fields, name, options) { editFor = null }
+            },
+            onDismiss = {
+                viewModel.clearError()
+                editFor = null
+            }
+        )
+    }
+
+    // Manual catch-up time correction: iptvsimple's -12h..+14h range, in half hours.
+    correctionFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            correctionFor = null
+        } else {
+            SettingsSingleChoiceDialog(
+                title = "Catch-up time correction",
+                subtitle = "Only needed when replays start at the wrong point",
+                options = CATCHUP_CORRECTION_OPTIONS.map {
+                    SettingsPickerOption(value = it, title = catchUpCorrectionLabel(it))
+                },
+                selectedValue = account.catchUpCorrectionMinutes,
+                onOptionSelected = {
+                    viewModel.setCatchUpCorrectionMinutes(id, it)
+                    correctionFor = null
+                },
+                onDismiss = { correctionFor = null }
+            )
+        }
+    }
+
+    // Manual guide EPG offset: same -12h..+14h half-hour range; 0 = auto-detect lying panels.
+    guideOffsetFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            guideOffsetFor = null
+        } else {
+            SettingsSingleChoiceDialog(
+                title = "Guide EPG offset",
+                subtitle = "Auto detects most wrong-clock panels; set this only if guide times are still shifted",
+                options = CATCHUP_CORRECTION_OPTIONS.map {
+                    SettingsPickerOption(value = it, title = guideEpgOffsetLabel(it))
+                },
+                selectedValue = account.guideEpgCorrectionMinutes,
+                onOptionSelected = {
+                    viewModel.setGuideEpgCorrectionMinutes(id, it)
+                    guideOffsetFor = null
+                },
+                onDismiss = { guideOffsetFor = null }
+            )
+        }
+    }
+
+    // Step 2: the playlist DETAILS page (full screen, two panes, three shelves) — for every playlist.
+    // Dialogs opened from it stack on top; Back returns to the page.
+    actionsForId?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            actionsForId = null
+            justAddedBy = null
+        } else {
+            val managed = managedInfos[id]
+            val needsReimport = viewModel.needsReimport(account)
+            PlaylistDetailsScreen(
+                state = PlaylistDetailsState(
+                    account = account,
+                    managed = managed,
+                    info = uiState.accountInfo[id],
+                    catalogLine = uiState.catalogCounts[id],
+                    needsReimport = needsReimport,
+                    backupLine = activeServers[id]?.let { n ->
+                        account.backupUrls?.getOrNull(n - 1)
+                            // T7: a backup M3U link carries the login too.
+                            ?.let { host -> stringResource(R.string.iptv_using_backup_server_host, n, com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(host)) }
+                            ?: stringResource(R.string.iptv_using_backup_server, n)
+                    },
+                    justAddedBy = justAddedBy,
+                    detachedFrom = detachedFrom?.takeIf { it.first == id }?.second,
+                    rematchStarted = id in rematchStarted,
+                    expiryCheckFailed = id in uiState.accountInfoFailed,
+                    nowEpochSec = System.currentTimeMillis() / 1000,
+                ),
+                onAction = { action ->
+                    when (action) {
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.CONTACT -> contactFor = id
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.CONTENT -> contentForId = id
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.HIDDEN -> {
+                            hiddenFor = account
+                            viewModel.loadHiddenItems(account)
+                        }
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.REMATCH -> {
+                            viewModel.rematchCatalog(id)
+                            rematchStarted = rematchStarted + id
+                        }
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.CATCHUP -> catchUpFor = id
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.GUIDE -> {
+                            guideFor = id
+                            viewModel.loadGuideCensus(account)
+                        }
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.EDIT,
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.REIMPORT -> editFor = account
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.TOGGLE_ENABLED ->
+                            viewModel.setEnabled(id, !account.enabled)
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.DETACH -> detachFor = id
+                        com.nuvio.tv.core.iptv.ManagedDetailsModel.DetailsAction.REMOVE -> removeConfirmFor = account
+                    }
+                },
+                onClose = {
+                    actionsForId = null
+                    justAddedBy = null
+                    detachedFrom = null
+                },
+            )
+        }
+    }
+
+    contactFor?.let { id ->
+        val managed = managedInfos[id]
+        if (managed == null) contactFor = null
+        else ContactDialog(providerName = managed.providerName, support = managed.support, onDismiss = { contactFor = null })
+    }
+
+    detachFor?.let { id ->
+        val managed = managedInfos[id]
+        if (managed == null) {
+            detachFor = null
+        } else {
+            HoldConfirmDialog(
+                title = stringResource(R.string.iptv_detach_title, managed.providerName),
+                message = stringResource(R.string.iptv_detach_message, managed.providerName),
+                holdLabel = stringResource(R.string.iptv_hold_to_detach),
+                onConfirmed = {
+                    val provider = managed.providerName
+                    viewModel.detach(id) { ok -> if (ok) detachedFrom = id to provider }
+                    detachFor = null
+                },
+                onDismiss = { detachFor = null },
+            )
+        }
+    }
+
+    // Catch-up / guide tuning (Xtream only): the three rows the old details dialog carried.
+    catchUpFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            catchUpFor = null
+        } else {
+            NuvioDialog(
+                onDismiss = { catchUpFor = null },
+                title = stringResource(R.string.iptv_catchup_dialog_title),
+                subtitle = com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.displayName(account.name),
+                scrollable = true
+            ) {
+                // F35: the phone/desktop wording, so "Prefer m3u8" is the same setting everywhere.
+                SettingsActionRow(
+                    title = CatchUpContainerCopy.TITLE,
+                    subtitle = CatchUpContainerCopy.description(account.preferM3u8CatchUp),
+                    value = CatchUpContainerCopy.value(account.preferM3u8CatchUp),
+                    onClick = { viewModel.setPreferM3u8CatchUp(account.id, !account.preferM3u8CatchUp) }
+                )
+                SettingsActionRow(
+                    title = "Catch-up time correction",
+                    subtitle = "Shift replay start times when the provider's clock is off",
+                    value = catchUpCorrectionLabel(account.catchUpCorrectionMinutes),
+                    onClick = {
+                        correctionFor = account.id
+                        catchUpFor = null
+                    }
+                )
+                SettingsActionRow(
+                    title = "Guide EPG offset",
+                    subtitle = "Shift guide times when programmes show at the wrong hour",
+                    value = guideEpgOffsetLabel(account.guideEpgCorrectionMinutes),
+                    onClick = {
+                        guideOffsetFor = account.id
+                        catchUpFor = null
+                    }
+                )
+            }
+        }
+    }
+
+    guideFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) guideFor = null
+        else if (tagsFor == null && assignFor == null) com.nuvio.tv.ui.screens.iptv.GuideNamesDialog(
+            account = account,
+            census = uiState.guideCensus[id],
+            onDismiss = { guideFor = null },
+            onAssign = {
+                assignFor = id
+                viewModel.searchGuideAssignChannels(account, "")
+            },
+            onToggleClean = { viewModel.setCleanChannelNames(id, !account.cleanChannelNames) },
+            onEditTags = { tagsFor = id },
+        )
+    }
+
+    tagsFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) tagsFor = null
+        else com.nuvio.tv.ui.screens.iptv.ChannelTagsDialog(
+            initial = account.channelNameTags.orEmpty(),
+            onSave = { text ->
+                viewModel.setChannelNameTags(account, text)
+                tagsFor = null
+            },
+            onDismiss = { tagsFor = null },
+        )
+    }
+
+    assignFor?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            assignFor = null
+        } else {
+            com.nuvio.tv.ui.screens.iptv.GuideAssignDialog(
+                account = account,
+                state = uiState.guideAssign?.takeIf { it.accountId == id },
+                onSearchChannels = { q -> viewModel.searchGuideAssignChannels(account, q) },
+                onOpenChannel = { ch -> viewModel.searchGuideOptions(account, ch, "") },
+                onSearchOptions = { ch, q -> viewModel.searchGuideOptions(account, ch, q) },
+                onPick = { ch, row -> viewModel.pickGuide(account, ch, row) },
+                onBack = { viewModel.backFromGuideOptions() },
+                onDismiss = {
+                    assignFor = null
+                    viewModel.closeGuideAssign()
+                    viewModel.loadGuideCensus(account)
+                },
+            )
+        }
+    }
+
+    hiddenFor?.let { account ->
+        val items = uiState.hiddenItems
+        // UX34: start on the first hidden item (Done only when there is nothing to unhide); re-aimed
+        // when the list changes so unhiding the focused row doesn't strand focus.
+        val firstHiddenFocus = remember { FocusRequester() }
+        val hiddenDoneFocus = remember { FocusRequester() }
+        val hiddenFocusTarget = HiddenItemsDialogFocusPolicy.initialFocus(items?.size)
+        // The wait ends at its deadline even if the read never returns; a failure offers Retry, never
+        // "Nothing is hidden" (BoundedLoad).
+        val hiddenStatus = com.nuvio.tv.ui.screens.iptv.rememberEffectiveLoadStatus(uiState.hiddenItemsLoad)
+        val hiddenFailed = items == null && hiddenStatus is com.nuvio.tv.core.iptv.LoadStatus.Failed
+        val hiddenRetryFocus = remember { FocusRequester() }
+        LaunchedEffect(hiddenFailed) { if (hiddenFailed) runCatching { hiddenRetryFocus.requestFocus() } }
+        LaunchedEffect(account.id, hiddenFocusTarget, items?.size) {
+            when (hiddenFocusTarget) {
+                HiddenItemsDialogFocusPolicy.Target.FIRST_ROW -> runCatching { firstHiddenFocus.requestFocus() }
+                HiddenItemsDialogFocusPolicy.Target.DONE -> runCatching { hiddenDoneFocus.requestFocus() }
+                HiddenItemsDialogFocusPolicy.Target.NONE -> Unit
+            }
+        }
+        NuvioDialog(
+            onDismiss = { hiddenFor = null },
+            title = "Hidden in ${com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.displayName(account.name)}",
+            subtitle = when {
+                hiddenFailed -> stringResource(R.string.iptv_settings_load_failed)
+                items == null -> "Loading\u2026"
+                items.isEmpty() -> "Nothing is hidden in this playlist. In the Live TV guide, press MENU on a " +
+                    "channel or a group to hide it."
+                else -> "Select one to bring it back."
+            },
+            width = 520.dp,
+            scrollable = true
+        ) {
+            if (hiddenFailed) {
+                Button(
+                    onClick = { viewModel.loadHiddenItems(account) },
+                    modifier = Modifier.fillMaxWidth().focusRequester(hiddenRetryFocus),
+                    scale = ButtonDefaults.scale(focusedScale = 1f)
+                ) { Text(stringResource(R.string.action_retry)) }
+            }
+            items.orEmpty().forEachIndexed { index, item ->
+                SettingsActionRow(
+                    title = item.name,
+                    subtitle = hiddenItemKindLabel(item),
+                    value = "Unhide",
+                    onClick = { viewModel.unhide(account, item) },
+                    modifier = if (index == 0) Modifier.focusRequester(firstHiddenFocus) else Modifier
+                )
+            }
+            Button(
+                onClick = { hiddenFor = null },
+                modifier = Modifier.fillMaxWidth().focusRequester(hiddenDoneFocus),
+                // Full-width: a focus scale would overhang the dialog padding (UX32).
+                scale = ButtonDefaults.scale(focusedScale = 1f)
+            ) { Text("Done") }
+        }
+    }
+
+    removeConfirmFor?.let { account ->
+        // Step 2: Remove confirms by HOLDING OK 2 s (Cancel focused first) — no typing on a remote, and a
+        // stray press can never delete a playlist. For a managed playlist the owner is named.
+        val providerName = managedInfos[account.id]?.providerName
+        HoldConfirmDialog(
+            title = stringResource(R.string.iptv_remove_title, com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.displayName(account.name)),
+            message = when (PlaylistRemovalUiPolicy.confirmWording(signedIn)) {
+                PlaylistRemovalUiPolicy.ConfirmWording.ALL_DEVICES -> stringResource(R.string.iptv_remove_playlist_message_all_devices)
+                PlaylistRemovalUiPolicy.ConfirmWording.IF_YOU_SYNC -> stringResource(R.string.iptv_remove_playlist_message_if_you_sync)
+            },
+            extraMessage = providerName?.let { stringResource(R.string.iptv_remove_managed_extra, it) },
+            holdLabel = stringResource(R.string.iptv_hold_to_remove),
+            onConfirmed = {
+                pendingRemoval = account.id to uiState.accounts.indexOfFirst { it.id == account.id }.coerceAtLeast(0)
+                viewModel.remove(account.id)
+                removeConfirmFor = null
+            },
+            onDismiss = { removeConfirmFor = null },
+        )
+    }
+
+    // Content & Categories: content-type toggles + per-type category checklist.
+    contentForId?.let { id ->
+        val account = uiState.accounts.firstOrNull { it.id == id }
+        if (account == null) {
+            contentForId = null; checklistType = null
+        } else {
+            LaunchedEffect(id) { viewModel.loadCategoryLists(account) }
+            XtreamContentTypesDialog(
+                account = account,
+                categoryLists = uiState.categoryLists,
+                onToggleType = { type, enabled -> viewModel.setContentTypeEnabled(id, type, enabled) },
+                onOpenChecklist = { type -> checklistType = type },
+                onDismiss = { contentForId = null; checklistType = null }
+            )
+            checklistType?.let { type ->
+                XtreamCategoryChecklistDialog(
+                    account = account,
+                    type = type,
+                    categories = uiState.categoryLists["$id|$type"],
+                    load = uiState.categoryListLoads["$id|$type"] ?: com.nuvio.tv.core.iptv.LoadStatus.Idle,
+                    onRetry = { viewModel.loadCategoryLists(account) },
+                    onSetSelection = { selection -> viewModel.setCategorySelection(id, type, selection) },
+                    onToggleCategory = { categoryId, isChecked -> viewModel.toggleCategory(id, type, categoryId, isChecked) },
+                    onDismiss = { checklistType = null }
+                )
+            }
+        }
+    }
+}
+
+private val CONTENT_TYPES = listOf(
+    XtreamAccount.TYPE_LIVE to "Live TV",
+    XtreamAccount.TYPE_MOVIES to "Movies",
+    XtreamAccount.TYPE_SERIES to "Series"
+)
+
+/** Matches SettingsMultiChoiceDialog's default list height so the checklist scrolls like other pickers. */
+private val SettingsDialogListMaxHeight = 420.dp
+
+/** Level 1: the three content-type rows (checkbox toggles the type, body opens its checklist). */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun XtreamContentTypesDialog(
+    account: XtreamAccount,
+    categoryLists: Map<String, List<com.nuvio.tv.core.iptv.XtreamCategory>>,
+    onToggleType: (type: String, enabled: Boolean) -> Unit,
+    onOpenChecklist: (type: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val firstRowFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstRowFocus.requestFocusAfterFrames() }
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = "Content & Categories",
+        subtitle = com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.displayName(account.name)
+    ) {
+        CONTENT_TYPES.forEachIndexed { index, (type, label) ->
+            val enabled = account.typeEnabled(type)
+            val selection = account.categorySelections.forType(type)
+            val total = categoryLists["${account.id}|$type"]?.size
+            val countText = when {
+                !enabled -> "Hidden"
+                selection == null -> "All categories"
+                total != null -> "${selection.size}/$total"
+                else -> "${selection.size} selected"
+            }
+            ContentTypeRow(
+                label = label,
+                enabled = enabled,
+                countText = countText,
+                focusRequester = if (index == 0) firstRowFocus else null,
+                onToggle = { onToggleType(type, !enabled) },
+                onOpen = { onOpenChecklist(type) }
+            )
+        }
+        Text(
+            text = "The toggle shows or hides a content type. Select a type to choose its categories.",
+            style = MaterialTheme.typography.bodySmall,
+            color = NuvioTheme.colors.TextTertiary
+        )
+    }
+}
+
+/** Compact value for the settings row: flags when we have them, otherwise counts. */
+private fun epgRegionSummaryValue(
+    selected: Set<String>,
+    available: List<com.nuvio.tv.core.epg.EpgRegion>,
+): String = when {
+    available.isEmpty() -> "—"
+    selected.isEmpty() -> "All (${available.size})"
+    else -> {
+        val flags = available.filter { it.name in selected }.mapNotNull { it.flag.ifEmpty { null } }
+        if (flags.isNotEmpty()) flags.take(4).joinToString(" ") + if (selected.size > 4) " +${selected.size - 4}" else ""
+        else "${selected.size} selected"
+    }
+}
+
+/**
+ * Guide-region picker. Toggling commits immediately to local dialog state; Done applies the
+ * whole selection at once, because each apply invalidates the stored index and kicks off a
+ * rebuild — doing that per keypress would restart the sync on every D-pad press.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun EpgRegionPickerDialog(
+    regions: List<com.nuvio.tv.core.epg.EpgRegion>,
+    initiallySelected: Set<String>,
+    onApply: (Set<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var selected by remember(initiallySelected) { mutableStateOf(initiallySelected) }
+    val firstRowFocus = remember { FocusRequester() }
+    LaunchedEffect(regions.isNotEmpty()) { firstRowFocus.requestFocusAfterFrames() }
+
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = "Guide regions",
+        subtitle = if (selected.isEmpty()) {
+            "Using every region — pick the ones you watch to store less guide data on this device"
+        } else {
+            "${selected.size} of ${regions.size} selected"
+        },
+    ) {
+        if (regions.isEmpty()) {
+            Text(
+                text = "Available after the first guide sync.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = NuvioTheme.colors.TextSecondary,
+            )
+            return@NuvioDialog
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)) {
+            SettingsDialogActionRow(horizontalAlignment = Alignment.Start) {
+                SettingsDialogActionButton("Done", onClick = { onApply(selected) }, primary = true)
+                SettingsDialogActionButton("Use all", onClick = { selected = emptySet() })
+            }
+            LazyColumn(
+                modifier = Modifier.heightIn(max = SettingsDialogListMaxHeight),
+                verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
+                contentPadding = PaddingValues(vertical = NuvioTheme.spacing.xs)
+            ) {
+                itemsIndexed(regions, key = { _, r -> r.name }) { index, region ->
+                    // B119: under "All" (empty) every row is checked and OK removes just that one.
+                    val checked = com.nuvio.tv.core.epg.EpgRegionSelection.isChecked(selected, region.name)
+                    EpgRegionCheckRow(
+                        region = region,
+                        checked = checked,
+                        focusRequester = if (index == 0) firstRowFocus else null,
+                        onToggle = {
+                            selected = com.nuvio.tv.core.epg.EpgRegionSelection.toggle(
+                                selected, regions.map { it.name }, region.name,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Region row: same Card+Check idiom as [CategoryCheckRow], with the flag and channel count. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun EpgRegionCheckRow(
+    region: com.nuvio.tv.core.epg.EpgRegion,
+    checked: Boolean,
+    focusRequester: FocusRequester?,
+    onToggle: () -> Unit,
+) {
+    Card(
+        onClick = onToggle,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier),
+        colors = CardDefaults.colors(
+            containerColor = if (checked) NuvioTheme.colors.FocusBackground else NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.FocusBackground
+        ),
+        shape = CardDefaults.shape(RoundedCornerShape(10.dp)),
+        scale = CardDefaults.scale(focusedScale = 1f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(NuvioTheme.spacing.lg),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (region.flag.isNotEmpty()) {
+                Text(text = region.flag, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(NuvioTheme.spacing.md))
+            }
+            Text(
+                text = region.name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (checked) NuvioTheme.colors.Primary else NuvioTheme.colors.TextPrimary,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${region.channelCount}",
+                style = MaterialTheme.typography.labelLarge,
+                color = NuvioTheme.colors.TextSecondary
+            )
+            if (checked) {
+                Spacer(Modifier.width(NuvioTheme.spacing.md))
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = NuvioTheme.colors.Primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Level 2: the category checklist for one content type. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun XtreamCategoryChecklistDialog(
+    account: XtreamAccount,
+    type: String,
+    categories: List<com.nuvio.tv.core.iptv.XtreamCategory>?,
+    load: com.nuvio.tv.core.iptv.LoadStatus,
+    onRetry: () -> Unit,
+    onSetSelection: (List<String>?) -> Unit,
+    onToggleCategory: (categoryId: String, isChecked: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val label = CONTENT_TYPES.firstOrNull { it.first == type }?.second ?: type
+    val selection = account.categorySelections.forType(type)
+    var filter by remember(account.id, type) { mutableStateOf("") }
+    val filteredCategories = remember(categories, filter) {
+        categories?.filter { it.name.contains(filter.trim(), ignoreCase = true) }.orEmpty()
+    }
+    val selectAllFocus = remember { FocusRequester() }
+    // The wait ends at its deadline even if the read never returns; a failure offers Retry (BoundedLoad).
+    val status = com.nuvio.tv.ui.screens.iptv.rememberEffectiveLoadStatus(load)
+    val failed = categories == null && status is com.nuvio.tv.core.iptv.LoadStatus.Failed
+    val retryFocus = remember { FocusRequester() }
+    LaunchedEffect(categories != null) { if (categories != null) selectAllFocus.requestFocusAfterFrames() }
+    LaunchedEffect(failed) { if (failed) retryFocus.requestFocusAfterFrames() }
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = "$label categories",
+        subtitle = when {
+            failed -> stringResource(R.string.iptv_settings_load_failed)
+            categories == null -> "Loading categories…"
+            else -> "${selection?.size ?: categories.size}/${categories.size} selected"
+        }
+    ) {
+        if (failed) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.fillMaxWidth().focusRequester(retryFocus),
+                // Full-width: a focus scale would overhang the dialog padding (UX32).
+                scale = ButtonDefaults.scale(focusedScale = 1f)
+            ) { Text(stringResource(R.string.action_retry)) }
+        }
+        if (categories == null) return@NuvioDialog
+        Column(verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)) {
+            SettingsDialogActionRow(horizontalAlignment = Alignment.Start) {
+                SettingsDialogActionButton("Select All", onClick = { onSetSelection(null) }, primary = true)
+                SettingsDialogActionButton("Deselect All", onClick = { onSetSelection(emptyList()) })
+            }
+            XtreamField(filter, { filter = it }, "Filter categories", onSubmit = {})
+            if (filteredCategories.isEmpty()) {
+                Text("No matching categories", color = NuvioTheme.colors.TextSecondary)
+            }
+            LazyColumn(
+                modifier = Modifier.heightIn(max = SettingsDialogListMaxHeight),
+                verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
+                contentPadding = PaddingValues(vertical = NuvioTheme.spacing.xs)
+            ) {
+                items(filteredCategories, key = { it.id }) { category ->
+                    val checked = selection == null || category.id in selection
+                    CategoryCheckRow(
+                        name = category.name.ifBlank { "Other" },
+                        checked = checked,
+                        // Send the OPERATION, not a recomputed list: composed state can be stale for
+                        // a beat after a fast previous toggle, and a whole-list write would clobber
+                        // it. The VM composes the toggle against the store's latest selection.
+                        onToggle = { onToggleCategory(category.id, !checked) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A content-type row built on the settings Card vocabulary: the row body opens the category
+ * checklist (value + chevron, like SettingsActionRow); a trailing [SettingsTogglePill] Card
+ * toggles the type on/off. Two focus targets, both using the FocusRing border, no Primary flood.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun ContentTypeRow(
+    label: String,
+    enabled: Boolean,
+    countText: String,
+    focusRequester: FocusRequester? = null,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
+    ) {
+        SettingsRowCard(
+            onClick = onOpen,
+            focusRequester = focusRequester,
+            modifier = Modifier.weight(1f)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.md),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = NuvioTheme.colors.TextPrimary.copy(alpha = if (enabled) 1f else 0.4f),
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = countText,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = NuvioTheme.colors.TextSecondary
+                )
+                Spacer(Modifier.width(NuvioTheme.spacing.sm))
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = NuvioTheme.colors.TextTertiary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        SettingsRowCard(onClick = onToggle) {
+            Box(Modifier.padding(horizontal = 18.dp, vertical = NuvioTheme.spacing.md)) {
+                SettingsTogglePill(checked = enabled, enabled = true)
+            }
+        }
+    }
+}
+
+/** A category row using the SettingsMultiChoiceDialog Card+Check idiom (immediate-commit toggle). */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun CategoryCheckRow(name: String, checked: Boolean, onToggle: () -> Unit) {
+    Card(
+        onClick = onToggle,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.colors(
+            containerColor = if (checked) NuvioTheme.colors.FocusBackground else NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.FocusBackground
+        ),
+        shape = CardDefaults.shape(RoundedCornerShape(10.dp)),
+        scale = CardDefaults.scale(focusedScale = 1f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(NuvioTheme.spacing.lg),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (checked) NuvioTheme.colors.Primary else NuvioTheme.colors.TextPrimary,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            if (checked) {
+                Spacer(Modifier.width(NuvioTheme.spacing.md))
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = NuvioTheme.colors.Primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Focusable Card matching the settings row focus vocabulary (FocusRing border, no scale, no flood). */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SettingsRowCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+    content: @Composable () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = modifier.then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier),
+        colors = CardDefaults.colors(
+            containerColor = NuvioTheme.colors.Background,
+            focusedContainerColor = NuvioTheme.colors.Background
+        ),
+        border = CardDefaults.border(
+            focusedBorder = Border(
+                border = BorderStroke(NuvioTheme.spacing.xxs, NuvioTheme.colors.FocusRing),
+                shape = RoundedCornerShape(SettingsPillRadius)
+            )
+        ),
+        shape = CardDefaults.shape(RoundedCornerShape(SettingsPillRadius)),
+        scale = CardDefaults.scale(focusedScale = 1f, pressedScale = 1f),
+        content = { content() }
+    )
+}
+
+// --- "Add Playlist" form (playlist manager P1/P2) ---------------------------
+// Xtream, URL, and File are functional; Stalker renders with a "Soon" badge and is non-selectable.
+// The File tile IS shown on TV: SAF's ACTION_OPEN_DOCUMENT is often unavailable on Android TV, so
+// the file source degrades gracefully — if no documents UI resolves the intent, it shows an inline
+// "add by URL or from your phone" message instead of crashing (see FileSourceFields). To enable a
+// future source, flip its `enabled` flag in [PLAYLIST_SOURCES] and fill in its field layout.
+
+/** A selectable source-type tile. `enabled=false` -> shows a "Soon" badge and can't be picked. */
+private data class PlaylistSource(
+    val id: String,
+    val label: String,
+    val enabled: Boolean
+)
+
+private val PLAYLIST_SOURCES = listOf(
+    PlaylistSource(XtreamAccount.SOURCE_URL, "URL", enabled = true),
+    PlaylistSource(XtreamAccount.SOURCE_FILE, "File", enabled = true),
+    PlaylistSource(XtreamAccount.SOURCE_XTREAM, "Xtream", enabled = true),
+    PlaylistSource(XtreamAccount.SOURCE_STALKER, "Stalker", enabled = true)
+)
+
+private data class DnsOption(val id: String, val label: String)
+
+private val DNS_OPTIONS = listOf(
+    DnsOption(XtreamAccount.DNS_SYSTEM, "System"),
+    DnsOption(XtreamAccount.DNS_CLOUDFLARE, "Cloudflare"),
+    DnsOption(XtreamAccount.DNS_GOOGLE, "Google"),
+    DnsOption(XtreamAccount.DNS_MULLVAD, "Mullvad"),
+    DnsOption(XtreamAccount.DNS_QUAD9, "Swiss"),
+    DnsOption(XtreamAccount.DNS_DNSSB, "DNS.SB")
+)
+
+private fun autoRefreshLabel(hours: Int): String = if (hours == 0) "Off" else "${hours}h"
+
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun XtreamAddDialog(
+    isValidating: Boolean,
+    error: String?,
+    onSubmitUrl: (String, XtreamSettingsViewModel.PlaylistOptions) -> Unit,
+    onSubmitManual: (server: String, user: String, pass: String, name: String?, XtreamSettingsViewModel.PlaylistOptions) -> Unit,
+    onSubmitM3U: (playlistUrl: String, userAgent: String?, name: String?, XtreamSettingsViewModel.PlaylistOptions) -> Unit,
+    onSubmitFile: (uri: Uri, fileName: String, name: String?, XtreamSettingsViewModel.PlaylistOptions) -> Unit,
+    onSubmitStalker: (fields: XtreamSettingsViewModel.StalkerFields, name: String?, XtreamSettingsViewModel.PlaylistOptions) -> Unit,
+    onDismiss: () -> Unit,
+    initial: XtreamAccount? = null
+) {
+    val context = LocalContext.current
+    // Source type — Xtream is the default; URL (M3U) + File are selectable too.
+    var sourceType by remember { mutableStateOf(initial?.sourceType ?: XtreamAccount.SOURCE_XTREAM) }
+
+    // File source: the picked document uri + its display name (null until the user picks one).
+    var pickedFileUri by remember { mutableStateOf<Uri?>(null) }
+    var pickedFileName by remember { mutableStateOf(if (initial?.sourceType == XtreamAccount.SOURCE_FILE) initial.fileName.orEmpty() else "") }
+    // ACTION_OPEN_DOCUMENT is often absent on Android TV — detect via resolveActivity and, if so,
+    // show an honest inline message instead of launching an intent that no activity can handle.
+    val openDocIntent = remember {
+        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+    }
+    val filePickerAvailable = remember {
+        openDocIntent.resolveActivity(context.packageManager) != null
+    }
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            pickedFileUri = uri
+            pickedFileName = queryDisplayName(context, uri) ?: pickedFileName.ifBlank { "playlist.m3u" }
+        }
+    }
+
+    // Xtream is portal + username + password (the reference form). The three fields are the
+    // default; "Paste link" stays as a secondary convenience. Pasting a get.php URL into the
+    // Server URL field also auto-fills user/pass, so most users never touch the toggle.
+    var manualMode by remember { mutableStateOf(true) }
+    var url by remember { mutableStateOf("") }
+    val isEditingM3U = initial?.sourceType == XtreamAccount.SOURCE_URL
+    var server by remember { mutableStateOf(if (isEditingM3U) "" else initial?.baseUrl ?: "") }
+    var user by remember { mutableStateOf(if (isEditingM3U) "" else initial?.username ?: "") }
+    var pass by remember { mutableStateOf(initial?.password ?: "") }
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    // Optional per-playlist stream UA for the Xtream source (M3U keeps its UA in [m3uUserAgent]).
+    var xtreamUserAgent by remember { mutableStateOf(if (isEditingM3U) "" else initial?.userAgent ?: "") }
+
+    // M3U URL source fields: the playlist URL lives in baseUrl, the optional User-Agent in username.
+    var m3uUrl by remember { mutableStateOf(if (isEditingM3U) initial.baseUrl else "") }
+    var m3uUserAgent by remember { mutableStateOf(if (isEditingM3U) initial.username else "") }
+
+    // Stalker portal source fields.
+    var portalUrl by remember { mutableStateOf(initial?.portalUrl ?: "") }
+    var mac by remember { mutableStateOf(initial?.macAddress?.ifBlank { "00:1A:79:" } ?: "00:1A:79:") }
+    var stalkerUser by remember { mutableStateOf(initial?.stalkerUsername ?: "") }
+    var stalkerPass by remember { mutableStateOf(initial?.stalkerPassword ?: "") }
+    var serial by remember { mutableStateOf(initial?.serialNumber ?: "") }
+    var deviceId by remember { mutableStateOf(initial?.deviceId ?: "") }
+    var sendDeviceId by remember { mutableStateOf(initial?.sendDeviceId ?: true) }
+    // F46: the rest of a real box's identity (all optional, blank = derived / preset).
+    var deviceId2 by remember { mutableStateOf(initial?.deviceId2 ?: "") }
+    var signature by remember { mutableStateOf(initial?.signature ?: "") }
+    var stbModel by remember { mutableStateOf(initial?.stbModel ?: "") }
+    var hwVersion by remember { mutableStateOf(initial?.hwVersion ?: "") }
+
+    // Step 0.3: backup server rows as typed, priority order (validated live; hidden for M3U files).
+    var backupRows by remember { mutableStateOf(initial?.backupUrls.orEmpty()) }
+    // The row open in the editor (index into backupRows), and whether it was just added.
+    var editingBackup by remember { mutableStateOf<Int?>(null) }
+    var editingBackupIsNew by remember { mutableStateOf(false) }
+    val showsBackups = com.nuvio.tv.core.iptv.BackupServerValidation.supportsBackups(sourceType)
+    val backupMain = when (sourceType) {
+        XtreamAccount.SOURCE_URL -> m3uUrl
+        XtreamAccount.SOURCE_STALKER -> portalUrl
+        else -> if (manualMode) server else parseXtreamAccount(url)?.baseUrl ?: url
+    }
+    val backupCheck = com.nuvio.tv.core.iptv.BackupServerValidation.validate(sourceType, backupMain, backupRows)
+
+    // Shared options (all source types).
+    var epgUrl by remember { mutableStateOf(initial?.epgUrl ?: "") }
+    var dnsProvider by remember { mutableStateOf(initial?.dnsProvider ?: XtreamAccount.DNS_SYSTEM) }
+    var autoRefreshHours by remember { mutableStateOf(initial?.autoRefreshHours ?: XtreamAccount.DEFAULT_AUTO_REFRESH_HOURS) }
+    var showRefreshPicker by remember { mutableStateOf(false) }
+    var showConnectionOptions by remember { mutableStateOf(false) }
+
+    val firstFieldFocus = remember { FocusRequester() }
+    val sourceTypeFocus = remember { FocusRequester() }
+    // Open the dialog on the source-type row (URL / File / Xtream / Stalker) so a D-pad user can
+    // actually reach every type. Previously focus was forced straight into the first text field,
+    // which stranded the type row above it — a remote user was stuck on whatever type was default.
+    // Only after the user actively picks a type (or toggles Enter details / Paste link) do we drop
+    // focus into the fields so they're ready to type.
+    var sourceTypePicked by remember { mutableStateOf(false) }
+    val editFocusManager = LocalFocusManager.current
+    LaunchedEffect(Unit) {
+        if (initial == null) sourceTypeFocus.requestFocusAfterFrames()
+        // An edit has no type tiles: start on the first field (a file playlist has none: first focusable).
+        else if (initial.sourceType != XtreamAccount.SOURCE_FILE) firstFieldFocus.requestFocusAfterFrames()
+        else { withFrameNanos { }; editFocusManager.moveFocus(FocusDirection.Enter) }
+    }
+    LaunchedEffect(manualMode, sourceType) {
+        if (sourceTypePicked) runCatching { firstFieldFocus.requestFocus() }
+    }
+
+    val options = {
+        XtreamSettingsViewModel.PlaylistOptions(
+            epgUrl = epgUrl.trim().ifEmpty { null },
+            dnsProvider = dnsProvider,
+            autoRefreshHours = autoRefreshHours,
+            // Only the Xtream form exposes this field; blank (every other source) => no override.
+            userAgent = xtreamUserAgent.trim().ifEmpty { null },
+            // Step 0.3: null for an M3U file (no backups — an edit keeps whatever it has).
+            backupUrls = if (showsBackups) backupRows else null,
+        )
+    }
+    // The status line ("Verifying…" / the save error) sits under the Save button at the foot of a
+    // scrolling form, so it was often below the fold and a failed save looked like nothing
+    // happened. Each submit and each new status scrolls it into view; focus stays on the button.
+    val statusReveal = remember { BringIntoViewRequester() }
+    var submitTick by remember { mutableIntStateOf(0) }
+    val submit = {
+        if (!isValidating) submitTick++
+        if (!isValidating && (!showsBackups || backupCheck.ok)) when (sourceType) {
+            XtreamAccount.SOURCE_XTREAM -> {
+                if (manualMode) {
+                    // The ViewModel names the problem (empty fields vs an invalid address) — this
+                    // used to be a silent no-op on any blank field.
+                    onSubmitManual(server.trim(), user.trim(), pass.trim(), name.trim().ifEmpty { null }, options())
+                } else if (url.isNotBlank()) {
+                    onSubmitUrl(url.trim(), options())
+                }
+            }
+            XtreamAccount.SOURCE_URL -> {
+                if (m3uUrl.isNotBlank()) {
+                    onSubmitM3U(m3uUrl.trim(), m3uUserAgent.trim().ifEmpty { null }, name.trim().ifEmpty { null }, options())
+                }
+            }
+            XtreamAccount.SOURCE_FILE -> {
+                pickedFileUri?.let { uri ->
+                    onSubmitFile(uri, pickedFileName.ifBlank { "playlist.m3u" }, name.trim().ifEmpty { null }, options())
+                }
+            }
+            XtreamAccount.SOURCE_STALKER -> {
+                if (portalUrl.isNotBlank() && mac.isNotBlank()) {
+                    onSubmitStalker(
+                        XtreamSettingsViewModel.StalkerFields(
+                            portalUrl = portalUrl.trim(),
+                            macAddress = mac.trim(),
+                            username = stalkerUser.trim(),
+                            password = stalkerPass.trim(),
+                            serialNumber = serial.trim(),
+                            deviceId = deviceId.trim(),
+                            sendDeviceId = sendDeviceId,
+                            deviceId2 = deviceId2.trim(),
+                            signature = signature.trim(),
+                            stbModel = stbModel.trim(),
+                            hwVersion = hwVersion.trim(),
+                        ),
+                        name.trim().ifEmpty { null },
+                        options()
+                    )
+                }
+            }
+        }
+    }
+
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = if (initial != null) "Edit Playlist" else "Add Playlist",
+        subtitle = if (initial != null) "Update this playlist's source and options" else "Add an IPTV source and choose its options",
+        width = 760.dp,
+        suppressFirstKeyUp = false
+    ) {
+        // The form is tall; scroll it so every field stays D-pad reachable inside the dialog.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = PlaylistFormMaxHeight)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.lg)
+        ) {
+            // --- Source Type -------------------------------------------------
+            FormSectionLabel("Source Type")
+            if (initial == null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)) {
+                    PLAYLIST_SOURCES.forEach { source ->
+                        SourceTypeTile(
+                            source = source,
+                            selected = sourceType == source.id,
+                            // The selected tile carries the requester so the dialog opens focused on it.
+                            focusRequester = if (sourceType == source.id) sourceTypeFocus else null,
+                            onClick = {
+                                if (source.enabled) {
+                                    sourceTypePicked = true
+                                    sourceType = source.id
+                                }
+                            }
+                        )
+                    }
+                }
+            } else {
+                // Step 2: the source type is chosen when a playlist is ADDED and never changes in an edit
+                // (switching it rebuilt the playlist as another kind under the old id). Read-only text, not a focus stop.
+                Text(
+                    text = PLAYLIST_SOURCES.firstOrNull { it.id == sourceType }?.label.orEmpty(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NuvioTheme.colors.TextSecondary
+                )
+            }
+
+            when (sourceType) {
+                XtreamAccount.SOURCE_XTREAM -> {
+                    // Xtream = portal (Server URL) + username + password. Enter details is primary;
+                    // Paste link is a secondary convenience.
+                    Row(modifier = Modifier.padding(top = NuvioTheme.spacing.xs)) {
+                        SettingsChoiceChip("Enter details", selected = manualMode, onClick = { sourceTypePicked = true; manualMode = true })
+                        Spacer(Modifier.width(NuvioTheme.spacing.sm))
+                        SettingsChoiceChip("Paste link", selected = !manualMode, onClick = { sourceTypePicked = true; manualMode = false })
+                    }
+                    if (manualMode) {
+                        // Pasting a full get.php URL into Server URL auto-fills username/password.
+                        XtreamField(server, { input ->
+                            val parsed = parseXtreamAccount(input)
+                            if (parsed != null) { server = parsed.baseUrl; user = parsed.username; pass = parsed.password }
+                            else server = input
+                        }, "Server URL  (portal, e.g. http://host:port)", firstFieldFocus, onSubmit = submit)
+                        XtreamField(user, { user = it }, "Username", onSubmit = submit)
+                        XtreamField(pass, { pass = it }, "Password", isPassword = true, onSubmit = submit)
+                    } else {
+                        XtreamField(url, { url = it }, "http://host:port/get.php?username=…&password=…", firstFieldFocus, onSubmit = submit, label = "Playlist URL")
+                    }
+                }
+                XtreamAccount.SOURCE_URL -> UrlSourceFields(
+                    url = m3uUrl,
+                    onUrlChange = { m3uUrl = it },
+                    firstFieldFocus = firstFieldFocus,
+                    onSubmit = submit
+                )
+                XtreamAccount.SOURCE_FILE -> FileSourceFields(
+                    pickerAvailable = filePickerAvailable,
+                    pickedFileName = pickedFileName,
+                    reimport = initial?.sourceType == XtreamAccount.SOURCE_FILE,
+                    onChooseFile = { runCatching { filePicker.launch(arrayOf("*/*")) } },
+                    onSubmit = submit
+                )
+                XtreamAccount.SOURCE_STALKER -> StalkerSourceFields(
+                    portalUrl = portalUrl, onPortalUrlChange = { portalUrl = it },
+                    mac = mac, onMacChange = { mac = it },
+                    username = stalkerUser, onUsernameChange = { stalkerUser = it },
+                    password = stalkerPass, onPasswordChange = { stalkerPass = it },
+                    serial = serial, onSerialChange = { serial = it },
+                    deviceId = deviceId, onDeviceIdChange = { deviceId = it },
+                    deviceId2 = deviceId2, onDeviceId2Change = { deviceId2 = it },
+                    signature = signature, onSignatureChange = { signature = it },
+                    stbModel = stbModel, onStbModelChange = { stbModel = it },
+                    hwVersion = hwVersion, onHwVersionChange = { hwVersion = it },
+                    sendDeviceId = sendDeviceId, onSendDeviceIdChange = { sendDeviceId = it },
+                    firstFieldFocus = firstFieldFocus,
+                    onSubmit = submit
+                )
+            }
+
+            // --- EPG URL (shared) --------------------------------------------
+            FormSectionLabel("EPG URLs (optional)")
+            XtreamField(epgUrl, { epgUrl = it }, "https://…/guide.xml.gz, https://…/more.xml", onSubmit = submit, label = "EPG URLs")
+            FormHelperText(
+                "Add one or more XMLTV guides, separated by commas. The first one wins for each channel; " +
+                    "the provider's own guide still covers every channel these don't."
+            )
+
+            XtreamField(name, { name = it }, "Name (optional)", onSubmit = submit)
+            SettingsActionRow(
+                title = "Connection options",
+                subtitle = "User-Agent, backup servers and DNS",
+                value = if (showConnectionOptions) "Expanded" else "Collapsed",
+                onClick = { showConnectionOptions = !showConnectionOptions }
+            )
+            if (showConnectionOptions) {
+                when (sourceType) {
+                    XtreamAccount.SOURCE_URL -> XtreamField(m3uUserAgent, { m3uUserAgent = it }, "User-Agent (optional)", onSubmit = submit)
+                    XtreamAccount.SOURCE_XTREAM -> XtreamField(xtreamUserAgent, { xtreamUserAgent = it }, "User-Agent (optional)", onSubmit = submit)
+                }
+            // --- Backup servers (Step 0.3; Xtream / M3U link / Stalker) --------
+            if (showsBackups) {
+                BackupServersSection(
+                    rows = backupRows,
+                    problems = backupCheck.problems.associate { it.index to it.problem },
+                    onEdit = { index ->
+                        editingBackupIsNew = false
+                        editingBackup = index
+                    },
+                    onAdd = {
+                        backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.add(backupRows)
+                        editingBackupIsNew = true
+                        editingBackup = backupRows.lastIndex
+                    },
+                )
+            }
+
+            // --- DNS Provider (shared) ---------------------------------------
+            FormSectionLabel("DNS Provider")
+            DnsProviderTiles(selected = dnsProvider, onSelect = { dnsProvider = it })
+            FormHelperText("Choose a DNS server for resolving this playlist's addresses. Cloudflare or Google can improve connection reliability.")
+
+            }
+
+            // --- Auto-Refresh (shared) ---------------------------------------
+            FormSectionLabel("Auto-Refresh")
+            SettingsActionRow(
+                title = "Auto-Refresh",
+                subtitle = null,
+                value = autoRefreshLabel(autoRefreshHours),
+                onClick = { showRefreshPicker = true }
+            )
+            FormHelperText("Periodically check this playlist for new movies and series.")
+
+            // Store policy: the app must state it ships no content of its own.
+            FormHelperText(
+                "Tuvora does not provide any channels, movies, or series. All content comes from " +
+                    "the playlist you add here, and you must have a valid subscription with that provider."
+            )
+
+            // --- Save --------------------------------------------------------
+            XtreamAddButton(
+                isValidating = isValidating,
+                label = if (initial != null) "Save changes" else "Add Playlist",
+                enabled = PlaylistFormSubmitPolicy.canSubmit(
+                    sourceType = sourceType,
+                    filePicked = pickedFileUri != null,
+                    portalUrl = portalUrl,
+                    macAddress = mac,
+                ) && (!showsBackups || backupCheck.ok),
+                onClick = submit
+            )
+
+            val status = when {
+                isValidating -> "Verifying…"
+                error != null -> error
+                else -> null
+            }
+            LaunchedEffect(status, submitTick) {
+                if (status == null) return@LaunchedEffect
+                // One frame so the line is laid out before the form scrolls to it.
+                withFrameNanos { }
+                runCatching { statusReveal.bringIntoView() }
+            }
+            if (status != null) {
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (error != null && !isValidating) NuvioTheme.colors.Error else NuvioTheme.colors.TextSecondary,
+                    modifier = Modifier.bringIntoViewRequester(statusReveal)
+                )
+            }
+        }
+    }
+
+    editingBackup?.let { index ->
+        if (index !in backupRows.indices) {
+            editingBackup = null
+        } else {
+            BackupServerEditorDialog(
+                index = index,
+                count = backupRows.size,
+                value = backupRows[index],
+                problem = backupCheck.problems.firstOrNull { it.index == index }?.problem,
+                hint = stringResource(
+                    if (sourceType == XtreamAccount.SOURCE_URL) R.string.iptv_backup_server_hint_m3u
+                    else R.string.iptv_backup_server_hint_base
+                ),
+                startTyping = editingBackupIsNew,
+                onValueChange = { backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.update(backupRows, index, it) },
+                onMoveUp = {
+                    backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.moveUp(backupRows, index)
+                    editingBackup = index - 1
+                },
+                onMoveDown = {
+                    backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.moveDown(backupRows, index)
+                    editingBackup = index + 1
+                },
+                onRemove = {
+                    backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.remove(backupRows, index)
+                    editingBackup = null
+                },
+                onDismiss = {
+                    // A row left blank is no server at all — drop it instead of keeping a "Not set" row.
+                    if (backupRows.getOrNull(index)?.isBlank() == true) {
+                        backupRows = com.nuvio.tv.core.iptv.BackupServerListEdits.remove(backupRows, index)
+                    }
+                    editingBackup = null
+                },
+            )
+        }
+    }
+
+    if (showRefreshPicker) {
+        SettingsSingleChoiceDialog(
+            title = "Auto-Refresh",
+            options = XtreamAccount.AUTO_REFRESH_OPTIONS.map {
+                SettingsPickerOption(value = it, title = autoRefreshLabel(it))
+            },
+            selectedValue = autoRefreshHours,
+            onOptionSelected = { autoRefreshHours = it; showRefreshPicker = false },
+            onDismiss = { showRefreshPicker = false }
+        )
+    }
+}
+
+/** Max height for the scrollable form body inside the dialog (dialog itself is height-capped too). */
+private val PlaylistFormMaxHeight = 460.dp
+
+/** Step 0.3: the inline message for a backup row with [problem] (string resources). */
+@Composable
+private fun backupProblemText(problem: com.nuvio.tv.core.iptv.BackupServerValidation.Problem): String = when (problem) {
+    com.nuvio.tv.core.iptv.BackupServerValidation.Problem.INVALID_URL -> stringResource(R.string.iptv_backup_server_problem_invalid)
+    com.nuvio.tv.core.iptv.BackupServerValidation.Problem.NOT_HTTP -> stringResource(R.string.iptv_backup_server_problem_not_http)
+    com.nuvio.tv.core.iptv.BackupServerValidation.Problem.DUPLICATE_OF_MAIN -> stringResource(R.string.iptv_backup_server_problem_same_as_main)
+    com.nuvio.tv.core.iptv.BackupServerValidation.Problem.DUPLICATE -> stringResource(R.string.iptv_backup_server_problem_duplicate)
+    com.nuvio.tv.core.iptv.BackupServerValidation.Problem.TOO_MANY ->
+        stringResource(R.string.iptv_backup_server_problem_too_many, com.nuvio.tv.core.iptv.BackupServerValidation.MAX_BACKUPS)
+}
+
+/**
+ * Step 0.3 — "Backup servers": an ordered list of alternate addresses (priority = order). Each row
+ * is a [SettingsActionRow] (the settings focus vocabulary) that opens [BackupServerEditorDialog] on
+ * OK — no text field lives in the form itself, so D-pad travel through the section never pops the
+ * keyboard (UX76). A row's validation problem shows as its value, in the error colour.
+ */
+@Composable
+private fun BackupServersSection(
+    rows: List<String>,
+    problems: Map<Int, com.nuvio.tv.core.iptv.BackupServerValidation.Problem>,
+    onEdit: (Int) -> Unit,
+    onAdd: () -> Unit,
+) {
+    FormSectionLabel(stringResource(R.string.iptv_backup_servers_title))
+    FormHelperText(stringResource(R.string.iptv_backup_servers_helper))
+    rows.forEachIndexed { index, value ->
+        SettingsActionRow(
+            title = stringResource(R.string.iptv_backup_server_row, index + 1),
+            subtitle = com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(value).ifBlank { stringResource(R.string.iptv_backup_server_not_set) }, // T7
+            value = problems[index]?.let { backupProblemText(it) },
+            valueColor = NuvioTheme.colors.Error,
+            onClick = { onEdit(index) },
+        )
+    }
+    if (com.nuvio.tv.core.iptv.BackupServerListEdits.canAdd(rows)) {
+        SettingsActionRow(
+            title = stringResource(R.string.iptv_backup_server_add),
+            subtitle = stringResource(R.string.iptv_backup_server_add_subtitle, com.nuvio.tv.core.iptv.BackupServerValidation.MAX_BACKUPS),
+            leadingIcon = Icons.Default.Add,
+            onClick = onAdd,
+        )
+    }
+}
+
+/**
+ * Step 0.3 — edit one backup row: its address, move up / down (priority), remove (confirmed). The address is a
+ * row until OK is pressed on it — only then does the text field (and the keyboard) appear, so moving
+ * or removing a server never opens the keyboard. A freshly added row starts in the field: the user
+ * pressed OK on "Add backup server" to type one.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun BackupServerEditorDialog(
+    index: Int,
+    count: Int,
+    value: String,
+    problem: com.nuvio.tv.core.iptv.BackupServerValidation.Problem?,
+    hint: String,
+    startTyping: Boolean,
+    onValueChange: (String) -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var typing by remember(index) { mutableStateOf(startTyping) }
+    var confirmingRemove by remember(index) { mutableStateOf(false) }
+    val fieldFocus = remember { FocusRequester() }
+    val addressRowFocus = remember { FocusRequester() }
+    val addressLabel = stringResource(R.string.iptv_backup_server_address)
+    if (confirmingRemove) {
+        BackupServerRemoveConfirmDialog(
+            index = index,
+            value = value,
+            onConfirm = {
+                confirmingRemove = false
+                onRemove()
+            },
+            onCancel = { confirmingRemove = false },
+        )
+        return
+    }
+    LaunchedEffect(typing, index) {
+        if (typing) fieldFocus.requestFocusAfterFrames() else addressRowFocus.requestFocusAfterFrames()
+    }
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = stringResource(R.string.iptv_backup_server_row, index + 1),
+        subtitle = stringResource(R.string.iptv_backup_servers_helper),
+        width = 560.dp,
+        suppressFirstKeyUp = false,
+        scrollable = true,
+    ) {
+        if (typing) {
+            XtreamField(
+                value = value,
+                onValueChange = onValueChange,
+                placeholder = "$addressLabel  ($hint)",
+                focusRequester = fieldFocus,
+                onSubmit = { typing = false },
+            )
+        } else {
+            SettingsActionRow(
+                title = addressLabel,
+                subtitle = com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(value).ifBlank { stringResource(R.string.iptv_backup_server_not_set) }, // T7
+                onClick = { typing = true },
+                modifier = Modifier.focusRequester(addressRowFocus),
+            )
+        }
+        problem?.let {
+            Text(
+                text = backupProblemText(it),
+                style = MaterialTheme.typography.bodySmall,
+                color = NuvioTheme.colors.Error,
+            )
+        }
+        // UX100: only the moves that can act (no disabled rows for focus to skip over), and Remove
+        // confirms before it drops the row.
+        com.nuvio.tv.core.iptv.BackupServerListEdits.rowActions(index, count).forEach { action ->
+            when (action) {
+                com.nuvio.tv.core.iptv.BackupServerListEdits.RowAction.MOVE_UP -> SettingsActionRow(
+                    title = stringResource(R.string.iptv_backup_server_move_up),
+                    subtitle = stringResource(R.string.iptv_backup_server_move_up_subtitle),
+                    onClick = onMoveUp,
+                )
+                com.nuvio.tv.core.iptv.BackupServerListEdits.RowAction.MOVE_DOWN -> SettingsActionRow(
+                    title = stringResource(R.string.iptv_backup_server_move_down),
+                    subtitle = stringResource(R.string.iptv_backup_server_move_down_subtitle),
+                    onClick = onMoveDown,
+                )
+                com.nuvio.tv.core.iptv.BackupServerListEdits.RowAction.REMOVE -> SettingsActionRow(
+                    title = stringResource(R.string.iptv_backup_server_remove),
+                    subtitle = null,
+                    onClick = { if (action.needsConfirmation) confirmingRemove = true else onRemove() },
+                )
+            }
+        }
+        Button(
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(stringResource(R.string.iptv_backup_server_done)) }
+    }
+}
+
+/**
+ * UX100 — "Remove backup server N?", the same shape as the Remove-playlist confirm: a danger-tinted
+ * Remove button over Cancel, with focus starting on Cancel so a stray OK can't delete.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun BackupServerRemoveConfirmDialog(
+    index: Int,
+    value: String,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val cancelFocus = remember { FocusRequester() }
+    LaunchedEffect(index) { cancelFocus.requestFocusAfterFrames() }
+    NuvioDialog(
+        onDismiss = onCancel,
+        title = stringResource(R.string.iptv_backup_server_remove_confirm_title, index + 1),
+        subtitle = value.ifBlank { null }?.let { stringResource(R.string.iptv_backup_server_remove_confirm_subtitle, com.nuvio.tv.core.iptv.PlaylistDisplayPolicy.maskedUrl(it)) }, // T7
+        width = 460.dp,
+    ) {
+        Button(
+            onClick = onConfirm,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.colors(
+                containerColor = Color(0xFF4A2323),
+                contentColor = NuvioTheme.colors.TextPrimary
+            )
+        ) {
+            Text(stringResource(R.string.iptv_backup_server_remove))
+        }
+        Button(
+            onClick = onCancel,
+            modifier = Modifier.fillMaxWidth().focusRequester(cancelFocus)
+        ) {
+            Text(stringResource(R.string.action_cancel))
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FormSectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = NuvioTheme.colors.TextPrimary
+    )
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FormHelperText(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = NuvioTheme.colors.TextTertiary
+    )
+}
+
+/**
+ * A source-type tile built on the settings Card vocabulary (FocusRing border, no scale/flood).
+ * Disabled tiles dim their label and show a "Soon" badge; they can be focused (so D-pad traversal
+ * isn't trapped) but selecting is a no-op.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SourceTypeTile(
+    source: PlaylistSource,
+    selected: Boolean,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
+    val alpha = if (source.enabled) 1f else 0.4f
+    Card(
+        onClick = onClick,
+        modifier = focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier,
+        // UX29 (house TV focus rule): selected = FILLED, focused = RING. Both used to draw the same
+        // hairline ring, so a focused selected tile looked exactly like an unfocused one.
+        colors = CardDefaults.colors(
+            containerColor = if (selected) NuvioTheme.colors.FocusRing.copy(alpha = 0.3f) else NuvioTheme.colors.Background,
+            focusedContainerColor = if (selected) NuvioTheme.colors.FocusRing.copy(alpha = 0.3f) else NuvioTheme.colors.Background
+        ),
+        border = CardDefaults.border(
+            border = Border.None,
+            focusedBorder = Border(
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                shape = RoundedCornerShape(SettingsPillRadius)
+            )
+        ),
+        shape = CardDefaults.shape(RoundedCornerShape(SettingsPillRadius)),
+        scale = CardDefaults.scale(focusedScale = 1f, pressedScale = 1f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = NuvioTheme.spacing.lg, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = source.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = (if (selected) NuvioTheme.colors.TextPrimary else NuvioTheme.colors.TextSecondary).copy(alpha = alpha)
+            )
+            if (!source.enabled) {
+                Spacer(Modifier.width(NuvioTheme.spacing.sm))
+                SoonBadge()
+            }
+        }
+    }
+}
+
+/** Small "Soon" pill for not-yet-enabled source tiles. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SoonBadge() {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(SettingsPillRadius))
+            .background(NuvioTheme.colors.BackgroundCard)
+            .padding(horizontal = NuvioTheme.spacing.sm, vertical = 2.dp)
+    ) {
+        Text(
+            text = "Soon",
+            style = MaterialTheme.typography.labelSmall,
+            color = NuvioTheme.colors.TextTertiary
+        )
+    }
+}
+
+/** DNS provider tiles wrapped across rows (3 per row) — reuses the SettingsChoiceChip pattern. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun DnsProviderTiles(selected: String, onSelect: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)) {
+        DNS_OPTIONS.chunked(3).forEach { rowItems ->
+            Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)) {
+                rowItems.forEach { option ->
+                    SettingsChoiceChip(
+                        label = option.label,
+                        selected = selected == option.id,
+                        onClick = { onSelect(option.id) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Field layout for a plain M3U/URL playlist source: the playlist URL (required) plus an optional
+ * User-Agent and display name. The parsed playlist becomes the catalog (streamed into the content
+ * DB on save) — there's no Xtream API, so no username/password. Uses the same [XtreamField] design
+ * vocabulary as the Xtream form.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun UrlSourceFields(
+    url: String,
+    onUrlChange: (String) -> Unit,
+    firstFieldFocus: FocusRequester,
+    onSubmit: () -> Unit
+) {
+    val focusManager = LocalFocusManager.current
+    // The M3U URL field has more fields below it (User-Agent, Name, then the shared EPG URL). On the
+    // Fire TV on-screen keyboard "Done" submits the whole form, so those later fields — the optional
+    // EPG URL in particular — were never reachable. Move focus down instead of submitting here.
+    XtreamField(
+        url, onUrlChange, "M3U URL  (http://host/get.php?…&type=m3u_plus  or  …/playlist.m3u)",
+        firstFieldFocus, imeAction = ImeAction.Next, onSubmit = onSubmit,
+        onImeAction = { focusManager.moveFocus(FocusDirection.Down) },
+    )
+    FormHelperText("Paste the playlist URL. The whole list is downloaded and indexed once so it browses fast; large lists take a moment after saving.")
+}
+
+/**
+ * Field layout for an M3U FILE source. When a documents UI is available, a "Choose file" button
+ * launches ACTION_OPEN_DOCUMENT (via the parent's launcher) and the picked file's name is shown;
+ * the file is copied into app storage on save and ingested like a URL playlist. When NO documents
+ * UI resolves the intent (common on Android TV), the button is replaced by an honest message
+ * pointing the user at the URL source or their phone (file playlists sync as an account, so a phone
+ * import shows up here to re-import). [reimport] tweaks the copy for a lost-local-file re-pick.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FileSourceFields(
+    pickerAvailable: Boolean,
+    pickedFileName: String,
+    reimport: Boolean,
+    onChooseFile: () -> Unit,
+    onSubmit: () -> Unit
+) {
+    if (!pickerAvailable) {
+        FormHelperText("No file picker on this device — add the file by URL or from your phone (it syncs).")
+        return
+    }
+    if (reimport && pickedFileName.isNotBlank()) {
+        FormHelperText("This file playlist was added on another device. Re-import \"$pickedFileName\" to browse it here.")
+    }
+    SettingsActionRow(
+        title = if (pickedFileName.isBlank()) "Choose file" else "Change file",
+        subtitle = pickedFileName.ifBlank { "Pick an .m3u / .m3u8 (or .gz) playlist file" },
+        value = null,
+        onClick = onChooseFile
+    )
+    FormHelperText("The file is copied into the app so it keeps working if the original moves or is deleted. File contents don't sync across devices.")
+}
+
+/** Best-effort human display name for a picked document uri (falls back to null). */
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String? =
+    runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) c.getString(idx) else null
+            } else null
+        }
+    }.getOrNull()
+
+/** Field layout for a Stalker portal (MAG/Ministra) source: portal URL + virtual STB MAC + optionals. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun StalkerSourceFields(
+    portalUrl: String, onPortalUrlChange: (String) -> Unit,
+    mac: String, onMacChange: (String) -> Unit,
+    username: String, onUsernameChange: (String) -> Unit,
+    password: String, onPasswordChange: (String) -> Unit,
+    serial: String, onSerialChange: (String) -> Unit,
+    deviceId: String, onDeviceIdChange: (String) -> Unit,
+    deviceId2: String, onDeviceId2Change: (String) -> Unit,
+    signature: String, onSignatureChange: (String) -> Unit,
+    stbModel: String, onStbModelChange: (String) -> Unit,
+    hwVersion: String, onHwVersionChange: (String) -> Unit,
+    sendDeviceId: Boolean, onSendDeviceIdChange: (Boolean) -> Unit,
+    firstFieldFocus: FocusRequester,
+    onSubmit: () -> Unit
+) {
+    XtreamField(portalUrl, onPortalUrlChange, "Portal URL  (http://host:port)", firstFieldFocus, onSubmit = onSubmit)
+    XtreamField(mac, onMacChange, "MAC Address  (00:1A:79:xx:xx:xx)", onSubmit = onSubmit)
+    SettingsActionRow(
+        title = "Randomize MAC",
+        subtitle = "Generate a virtual STB MAC (Infomir range)",
+        value = null,
+        onClick = { onMacChange(randomStbMac()) }
+    )
+    var showIdentityOptions by remember { mutableStateOf(false) }
+    SettingsActionRow(
+        title = "Portal identity options",
+        subtitle = "Only needed when your provider supplies specific box details",
+        value = if (showIdentityOptions) "Expanded" else "Collapsed",
+        onClick = { showIdentityOptions = !showIdentityOptions }
+    )
+    if (showIdentityOptions) {
+    XtreamField(username, onUsernameChange, "Username (optional)", onSubmit = onSubmit)
+    XtreamField(password, onPasswordChange, "Password (optional)", isPassword = true, onSubmit = onSubmit)
+    XtreamField(serial, onSerialChange, "Serial Number (optional)", onSubmit = onSubmit)
+    XtreamField(deviceId, onDeviceIdChange, "Device ID (optional)", onSubmit = onSubmit)
+    XtreamField(deviceId2, onDeviceId2Change, "Device ID 2 (optional)", onSubmit = onSubmit)
+    XtreamField(signature, onSignatureChange, "Signature (optional)", onSubmit = onSubmit)
+    XtreamField(stbModel, onStbModelChange, "STB Model (optional, e.g. MAG254)", onSubmit = onSubmit)
+    XtreamField(hwVersion, onHwVersionChange, "Hardware Version (optional, e.g. 2.6-IB-00)", onSubmit = onSubmit)
+    SettingsActionRow(
+        title = "Send signature",
+        subtitle = "Include the signature in portal requests",
+        value = if (sendDeviceId) "On" else "Off",
+        onClick = { onSendDeviceIdChange(!sendDeviceId) }
+    )
+    }
+    FormHelperText("Enter your portal URL and the MAC registered with the provider. The serial, device IDs and signature are derived from the MAC and Tuvora presents itself as a MAG250 — only fill in the optional fields if your provider (or your old box) gave you specific values. Long values are easier to enter from your phone: use \"Add from phone\".")
+}
+
+/** A virtual STB MAC in Infomir's 00:1A:79 range (the OUI most Stalker portals accept). */
+private fun randomStbMac(): String {
+    val tail = (0 until 3).joinToString(":") { "%02X".format(kotlin.random.Random.nextInt(0, 256)) }
+    return "00:1A:79:$tail"
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
+@Composable
+private fun XtreamField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    focusRequester: FocusRequester? = null,
+    isPassword: Boolean = false,
+    imeAction: ImeAction = ImeAction.Done,
+    onSubmit: () -> Unit,
+    // What the keyboard action (and hardware ENTER) does. Defaults to submitting the form, so every
+    // existing field is unchanged; a field that has more fields below it (e.g. the M3U URL field with
+    // the EPG URL field after it) passes ImeAction.Next + a move-focus-down here so the on-screen
+    // "Done" key does not submit the whole form before the later fields are reachable.
+    onImeAction: () -> Unit = onSubmit,
+    // B58: a persistent name above the field (placeholders vanish once typed, and Edit mode is
+    // pre-filled so it showed no names at all). Defaults to the placeholder's name part —
+    // "Server URL  (portal, e.g. …)" -> "Server URL" — so the example stays as the in-field hint.
+    label: String = placeholder.substringBefore("  (").trim(),
+) {
+    // UX30 / UX76: the field is a ROW until OK is pressed on it (the account InputField pattern).
+    // A legacy BasicTextField opens the keyboard the moment it gains focus, so D-padding down the
+    // form popped the keyboard on every field and each one needed a BACK to pass. Now the row is
+    // the D-pad focus target and the text field can only take focus while [editing]; OK/ENTER on
+    // the row starts editing (and so the keyboard), UP/DOWN while editing leave it, and BACK while
+    // editing returns to the row instead of closing the dialog. Decisions: [InputFieldKeys].
+    var editing by remember { mutableStateOf(false) }
+    var rowFocused by remember { mutableStateOf(false) }
+    var fieldFocused by remember { mutableStateOf(false) }
+    val ownRowFocus = remember { FocusRequester() }
+    val rowFocus = focusRequester ?: ownRowFocus
+    val fieldFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(editing) {
+        if (editing && fieldFocus.requestFocusAfterFrames(frames = 1)) keyboard?.show()
+    }
+    val shape = RoundedCornerShape(10.dp)
+    val active = rowFocused || fieldFocused
+    // The label now names the field, so the in-field hint keeps only the example part (if any).
+    val hint = placeholder.removePrefix(label).trim()
+    Column(modifier = Modifier.fillMaxWidth().padding(top = NuvioTheme.spacing.md)) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (active) NuvioTheme.colors.TextPrimary else NuvioTheme.colors.TextSecondary
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = NuvioTheme.spacing.xs)
+            .focusRequester(rowFocus)
+            .onFocusChanged { rowFocused = it.isFocused }
+            .onKeyEvent { event ->
+                val native = event.nativeKeyEvent
+                if (InputFieldKeys.startsEditing(editing, native.action == KeyEvent.ACTION_DOWN && native.repeatCount == 0, native.keyCode)) {
+                    editing = true
+                    true
+                } else false
+            }
+            .focusable()
+            .background(NuvioTheme.colors.BackgroundElevated, shape)
+            // House TV focus rule: the D-pad-focused row shows the theme focus ring (2dp); while
+            // typing the ring stays, thinner; idle rows keep the plain hairline border.
+            .border(
+                when {
+                    rowFocused -> NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs)
+                    fieldFocused -> NuvioTheme.focusRing.border(NuvioTheme.spacing.hairline)
+                    else -> BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border)
+                },
+                shape
+            )
+            .padding(horizontal = 14.dp, vertical = NuvioTheme.spacing.md)
+    ) {
+    // The Fire TV / Android TV keyboard runs fullscreen (extract mode) over the app and shows the
+    // field name only from EditorInfo.hintText, which Compose never sets — pass the label through.
+    InterceptPlatformTextInput(
+        interceptor = { request, nextHandler ->
+            val labelledRequest = PlatformTextInputMethodRequest { outAttributes ->
+                request.createInputConnection(outAttributes).also { outAttributes.hintText = label }
+            }
+            nextHandler.startInputMethod(labelledRequest)
+        }
+    ) {
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(fieldFocus)
+            .focusProperties { canFocus = editing }
+            .onFocusChanged {
+                val nowFocused = it.isFocused || it.hasFocus
+                if (fieldFocused && !nowFocused) editing = false
+                fieldFocused = nowFocused
+            }
+            // A focused (IME-dismissed) BasicTextField swallows D-pad UP/DOWN — it re-shows the
+            // keyboard instead of letting focus advance. Intercept UP/DOWN in the tunneling
+            // (preview) pass, BEFORE the field's own key handling, and drive the focus manager so
+            // DOWN steps to the next row and UP to the previous one; leaving ends editing.
+            // LEFT/RIGHT (cursor) and CENTER (re-show the keyboard) fall through to the field.
+            .onPreviewKeyEvent { event ->
+                val native = event.nativeKeyEvent
+                if (InputFieldKeys.stopsEditingOnBack(editing, native.keyCode)) {
+                    if (native.action == KeyEvent.ACTION_UP) {
+                        keyboard?.hide()
+                        runCatching { rowFocus.requestFocus() }
+                    }
+                    return@onPreviewKeyEvent true
+                }
+                val direction = InputFieldKeys.exitDirection(
+                    isEditing = editing,
+                    isKeyDown = native.action == KeyEvent.ACTION_DOWN,
+                    keyCode = native.keyCode
+                ) ?: return@onPreviewKeyEvent false
+                keyboard?.hide()
+                focusManager.moveFocus(direction)
+                true
+            }
+            .onKeyEvent { event ->
+                val native = event.nativeKeyEvent
+                when {
+                    (native.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || native.keyCode == KeyEvent.KEYCODE_ENTER || native.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) &&
+                        native.action == KeyEvent.ACTION_DOWN -> {
+                        editing = false; keyboard?.hide(); runCatching { rowFocus.requestFocus() }
+                        if (imeAction == ImeAction.Next) onImeAction()
+                        true
+                    }
+                    else -> false
+                }
+            },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = imeAction),
+        keyboardActions = KeyboardActions(
+            onDone = { editing = false; keyboard?.hide(); runCatching { rowFocus.requestFocus() } },
+            onNext = { editing = false; keyboard?.hide(); runCatching { rowFocus.requestFocus() }; onImeAction() }
+        ),
+        visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(color = NuvioTheme.colors.TextPrimary),
+        cursorBrush = SolidColor(if (fieldFocused) NuvioTheme.colors.TextPrimary else Color.Transparent),
+        decorationBox = { inner ->
+            if (value.isEmpty() && hint.isNotEmpty()) {
+                Text(hint, style = MaterialTheme.typography.bodyMedium, color = NuvioTheme.colors.TextTertiary)
+            }
+            inner()
+        }
+    )
+    }
+    }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun XtreamAddButton(
+    isValidating: Boolean,
+    label: String = "Add account",
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val contentAlpha = if (enabled) 1f else 0.4f
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = NuvioTheme.spacing.md)
+            .clip(shape)
+            // UX29: Primary is a neutral grey in the theme, so the old "focused = Primary fill" was
+            // nearly invisible against the dialog. Focus now shows the theme focus ring (2dp) over
+            // a tinted fill — the same vocabulary as every other TV focusable.
+            .background(if (focused) NuvioTheme.colors.FocusRing.copy(alpha = 0.25f) else NuvioTheme.colors.BackgroundCard)
+            .border(
+                if (focused) NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs)
+                else BorderStroke(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border),
+                shape
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(enabled = enabled && !isValidating, onClick = onClick)
+            .padding(vertical = NuvioTheme.spacing.md),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = if (isValidating) "Verifying…" else label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = NuvioTheme.colors.TextPrimary.copy(alpha = contentAlpha)
+        )
+    }
+}
+
+/**
+ * Catch-up time-correction choices: iptvsimple's -12h..+14h range in half hours, which is what
+ * every real-world provider offset needs (whole and half-hour zones both exist).
+ */
+private val CATCHUP_CORRECTION_OPTIONS: List<Int> =
+    generateSequence(XtreamAccount.CATCHUP_CORRECTION_MIN_MINUTES) { it + 30 }
+        .takeWhile { it <= XtreamAccount.CATCHUP_CORRECTION_MAX_MINUTES }
+        .toList()
+
+private fun catchUpCorrectionLabel(minutes: Int): String {
+    // 0 is not "UTC": replays follow the panel's own measured clock; this only corrects it (B117).
+    if (minutes == 0) return "None"
+    val sign = if (minutes < 0) "-" else "+"
+    val abs = kotlin.math.abs(minutes)
+    return if (abs % 60 == 0) "$sign${abs / 60}h" else "$sign${abs / 60}h ${abs % 60}m"
+}
+
+/** Same scale as [catchUpCorrectionLabel] but 0 reads "Auto": unset means detect, not "+0". */
+private fun guideEpgOffsetLabel(minutes: Int): String =
+    if (minutes == 0) "Auto" else catchUpCorrectionLabel(minutes)
+
+private fun hiddenItemKindLabel(item: com.nuvio.tv.core.iptv.overlay.IptvHiddenItemsPolicy.HiddenItem): String =
+    when (item.kind) {
+        com.nuvio.tv.core.iptv.overlay.IptvHiddenItemsPolicy.HiddenKind.CHANNEL -> "Channel"
+        com.nuvio.tv.core.iptv.overlay.IptvHiddenItemsPolicy.HiddenKind.GROUP -> when (item.contentType) {
+            XtreamAccount.TYPE_MOVIES -> "Movie group"
+            XtreamAccount.TYPE_SERIES -> "Series group"
+            else -> "Channel group"
+        }
+    }

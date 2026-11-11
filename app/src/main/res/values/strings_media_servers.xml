@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Server resume offer (PlayerScreen). English only. -->
+<resources>
+    <string name="ms_resume_from_server_message">You watched further on your server. Continue at %1$s?</string>
+    <string name="ms_resume_from_server_action">Continue</string>
+</resources>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="backup_title">Sauvegarde et restauration</string>
+    <string name="backup_subtitle">Transférer les profils et les réglages IPTV dans un fichier chiffré par mot de passe.</string>
+    <string name="backup_picker_missing">Aucun sélecteur de documents installé. Parcourez les dossiers accessibles ci-dessous ou installez un fournisseur de documents pour accéder à une clé USB.</string>
+    <string name="backup_export_success">Sauvegarde chiffrée enregistrée.</string>
+    <string name="backup_file_saved">Sauvegarde chiffrée enregistrée : %1$s</string>
+    <string name="backup_wrong_password">Mot de passe incorrect ou sauvegarde modifiée.</string>
+    <string name="backup_invalid_file">Sauvegarde invalide, endommagée ou incompatible. Aucune modification effectuée.</string>
+    <string name="backup_sign_out">La restauration nécessite de déconnecter le compte de l’application pour préserver les données du cloud. Déconnectez-vous avant l’import.</string>
+    <string name="backup_pin_required">Déverrouillez une fois le profil %1$s avant la sauvegarde pour préserver son PIN de façon sécurisée.</string>
+    <string name="backup_password_hint">Utilisez au moins 12 caractères. Conservez ce mot de passe : il ne peut pas être récupéré.</string>
+    <string name="backup_operation_failed">Échec de l’opération. Vérifiez le fichier, l’espace disponible et les autorisations d’accès.</string>
+    <string name="backup_working">Traitement en cours… Veuillez patienter.</string>
+    <string name="backup_restart_hint">La restauration est prête. Redémarrez pour l’installer. Une sauvegarde de secours chiffrée est conservée sur cet appareil avec le même mot de passe.</string>
+    <string name="backup_restart">Redémarrer et terminer la restauration</string>
+    <string name="backup_preview">%1$d profils · %2$d connexions IPTV</string>
+    <string name="backup_replace_warning">Les profils, favoris, historiques et réglages locaux seront remplacés. Les connexions IPTV et clés API sont restaurées ; reconnectez le compte principal et les services liés à un appareil. Vérifiez les profils avant de confirmer.</string>
+    <string name="backup_confirm_replace">Remplacer la configuration locale</string>
+    <string name="backup_choose_folder">Choisir un dossier accessible</string>
+    <string name="backup_parent">Dossier parent</string>
+    <string name="backup_save_here">Enregistrer dans ce dossier</string>
+    <string name="backup_export">Exporter</string>
+    <string name="backup_import">Importer</string>
+    <string name="backup_password">Mot de passe de sauvegarde</string>
+    <string name="backup_password_confirm">Confirmer le mot de passe</string>
+    <string name="backup_choose_document">Choisir un document</string>
+    <string name="backup_browse_files">Parcourir les dossiers accessibles</string>
+    <string name="backup_playlist_limit">Les fichiers M3U locaux dépassent la limite de sauvegarde de 16 Mo. Utilisez des playlists par URL ou des fichiers plus petits avant l’export.</string>
+    <string name="backup_resume_sync">Reprendre la synchronisation cloud</string>
+    <string name="backup_sync_held">La configuration restaurée reste locale jusqu’à la reprise explicite de la synchronisation.</string>
+    <string name="backup_resume_sync_warning">Redémarrer et reprendre la synchronisation avec le compte connecté ? La synchronisation habituelle peut mettre à jour les profils et réglages locaux et distants.</string>
+</resources>

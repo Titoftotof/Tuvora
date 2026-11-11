@@ -1,0 +1,303 @@
+package com.nuvio.tv.playback.mpv
+
+import com.nuvio.tv.playback.core.AudioMode
+import com.nuvio.tv.playback.core.ApplicationDnsKey
+import com.nuvio.tv.playback.core.AudioOutputPreference
+import com.nuvio.tv.playback.core.BufferingPreference
+import com.nuvio.tv.playback.core.ContentType
+import com.nuvio.tv.playback.core.CrossHostAuthorization
+import com.nuvio.tv.playback.core.DecoderMode
+import com.nuvio.tv.playback.core.DecoderPreference
+import com.nuvio.tv.playback.core.DnsPolicy
+import com.nuvio.tv.playback.core.EngineType
+import com.nuvio.tv.playback.core.FrameRatePreference
+import com.nuvio.tv.playback.core.GraphOutputProfile
+import com.nuvio.tv.playback.core.HdrPreference
+import com.nuvio.tv.playback.core.PlaybackEngineStart
+import com.nuvio.tv.playback.core.PlaybackGraph
+import com.nuvio.tv.playback.core.PlaybackNetworkRequest
+import com.nuvio.tv.playback.core.TransientLoadRetryPolicy
+import com.nuvio.tv.playback.core.PlaybackRequest
+import com.nuvio.tv.playback.core.PlaybackRequirements
+import com.nuvio.tv.playback.core.PlaybackResult
+import com.nuvio.tv.playback.core.RedirectPolicy
+import com.nuvio.tv.playback.core.ResourceBudget
+import com.nuvio.tv.playback.core.SessionPriority
+import com.nuvio.tv.playback.core.SessionProfile
+import com.nuvio.tv.playback.core.StreamEvidence
+import com.nuvio.tv.playback.core.SubtitleFidelity
+import com.nuvio.tv.playback.core.SurfaceMode
+import com.nuvio.tv.playback.core.VideoQualityIntent
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class MpvAdapterPlanTest {
+    @Test
+    fun `live time limits and byte budgets follow selected target and device tier`() {
+        for (seconds in listOf(5, 20, 60)) {
+            val chosen = requirements().copy(
+                buffering = BufferingPreference.CUSTOM,
+                customBuffer = com.nuvio.tv.playback.core.LiveBufferPolicy.customBuffer(seconds),
+            )
+            for (tier in com.nuvio.tv.core.memory.MemoryTier.entries) {
+                val budget = com.nuvio.tv.core.memory.demuxerBytesFor(tier)
+                val result = MpvAdapterPlanFactory.create(start(requirements = chosen), budget)
+                val options = (result as PlaybackResult.Success).value.preInitOptions
+                assertEquals(seconds.toDouble().toString(), options["cache-secs"])
+                assertEquals(options["cache-secs"], options["demuxer-readahead-secs"])
+                assertEquals(budget.maxBytes.toString(), options["demuxer-max-bytes"])
+                assertEquals(budget.maxBackBytes.toString(), options["demuxer-max-back-bytes"])
+            }
+        }
+        val auto = plan(start()).preInitOptions
+        assertEquals(auto["cache-secs"], auto["demuxer-readahead-secs"])
+        val vod = plan(start(request = PlaybackRequest("https://example.test/vod", contentType = ContentType.VOD)))
+        assertNull(vod.preInitOptions["cache-secs"])
+    }
+
+    @Test
+    fun `direct graph spells native embed and hardware decode exactly`() {
+        val plan = plan(
+            start(
+                graph = graph(GraphOutputProfile.MPV_DIRECT, DecoderMode.HARDWARE),
+                requirements = requirements(subtitles = false),
+            ),
+        )
+        assertEquals("mediacodec_embed", plan.preInitOptions["vo"])
+        assertEquals("mediacodec", plan.preInitOptions["hwdec"])
+        assertEquals(SurfaceMode.NATIVE_EMBED, plan.surfaceMode)
+    }
+
+    @Test
+    fun `render software graph spells gpu android and disables hardware decode`() {
+        val plan = plan(start(graph = graph(GraphOutputProfile.MPV_RENDER, DecoderMode.SOFTWARE)))
+        assertEquals("gpu", plan.preInitOptions["vo"])
+        assertEquals("android", plan.preInitOptions["gpu-context"])
+        assertEquals("no", plan.preInitOptions["hwdec"])
+    }
+
+    @Test
+    fun `mpv always sets tls-verify explicitly because the libmpv default depends on how it was built`() {
+        for (type in listOf(ContentType.LIVE, ContentType.VOD)) {
+            val plan = plan(start(request = PlaybackRequest("https://example.test/x", contentType = type)))
+            assertEquals("tls-verify for $type", "yes", plan.preInitOptions["tls-verify"])
+        }
+    }
+
+    @Test
+    fun `re-openable live enables ffmpeg demuxer reconnect so a transient drop freezes not blacks`() {
+        // Field bug (Amlogic onn box): a transient live drop / provider rollover tore the graph
+        // down to a black screen with no auto-recovery. FFmpeg-level reconnect keeps the decoder and
+        // video output alive so the last frame stays under the buffering spinner and playback
+        // resumes — the VLC/mpv approach. reconnect_streamed=1 is required for non-seekable live.
+        val plan = plan(
+            start(request = PlaybackRequest("https://example.test/live", contentType = ContentType.LIVE)),
+        )
+        assertEquals(
+            "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
+            plan.preInitOptions["stream-lavf-o"],
+        )
+    }
+
+    @Test
+    fun `live uses a short network-timeout so a dead channel surfaces fast while vod keeps the long default`() {
+        // A dead live channel must emit end-file quickly so the fresh-link reconnect loop can start,
+        // rather than hanging for mpv's 60s default. VOD keeps the long default (a slow seekable read
+        // is not a dead source).
+        val live = plan(start(request = PlaybackRequest("https://example.test/live", contentType = ContentType.LIVE)))
+        assertEquals("15", live.preInitOptions["network-timeout"])
+        val vod = plan(start(request = PlaybackRequest("https://example.test/movie.mkv", contentType = ContentType.VOD)))
+        assertEquals("60", vod.preInitOptions["network-timeout"])
+    }
+
+    @Test
+    fun `a chosen live buffer sets the rebuffer cushion and readahead while auto keeps the default refill cushion`() {
+        // F13: mpv refills only 1 s after a stall by default; a user-chosen live buffer raises that.
+        val chosen = requirements().copy(
+            buffering = BufferingPreference.CUSTOM,
+            customBuffer = com.nuvio.tv.playback.core.LiveBufferPolicy.customBuffer(20),
+        )
+        val live = plan(start(requirements = chosen))
+        assertEquals("10.0", live.preInitOptions["cache-pause-wait"])
+        assertEquals("20.0", live.preInitOptions["demuxer-readahead-secs"])
+        assertEquals("20.0", live.preInitOptions["cache-secs"])
+        val auto = plan(start())
+        assertNull(auto.preInitOptions["cache-pause-wait"])
+        val vod = plan(
+            start(
+                request = PlaybackRequest("https://example.test/movie.mkv", contentType = ContentType.VOD),
+                requirements = chosen,
+            ),
+        )
+        assertNull(vod.preInitOptions["cache-pause-wait"])
+    }
+
+    @Test
+    fun `single-use link never reconnects at the socket layer`() {
+        // A SESSION_ONLY link (e.g. Stalker create_link) is dead after first use; re-opening the
+        // same URL would replay a stale/expired link. Only PlaybackSession may mint a fresh one.
+        val plan = plan(
+            start(
+                request = PlaybackRequest(
+                    "https://example.test/live",
+                    contentType = ContentType.LIVE,
+                    network = PlaybackNetworkRequest(
+                        transientLoadRetryPolicy = TransientLoadRetryPolicy.SESSION_ONLY,
+                    ),
+                ),
+            ),
+        )
+        assertEquals("reconnect=0,reconnect_streamed=0", plan.preInitOptions["stream-lavf-o"])
+    }
+
+    @Test
+    fun `request material is mapped but never exposed by plan string`() {
+        val secretUrl = "https://secret.test/live/token"
+        val secret = "Bearer private"
+        val plan = plan(
+            start(
+                request = PlaybackRequest(
+                    secretUrl,
+                    headers = mapOf("Authorization" to secret),
+                    cookies = mapOf("session" to "cookie-secret"),
+                    crossHostAuthorization = CrossHostAuthorization.PRESERVE,
+                    contentType = ContentType.LIVE,
+                ),
+            ),
+        )
+        assertEquals(secret, plan.headers["Authorization"])
+        assertFalse(plan.toString().contains(secretUrl))
+        assertFalse(plan.toString().contains(secret))
+        assertFalse(plan.toString().contains("cookie-secret"))
+    }
+
+    @Test
+    fun `unsupported network guarantees fail closed instead of being approximated`() {
+        val requests = listOf(
+            PlaybackRequest("https://example.test/live", redirectPolicy = RedirectPolicy.REJECT, contentType = ContentType.LIVE),
+            PlaybackRequest(
+                "https://example.test/live",
+                network = PlaybackNetworkRequest(callTimeoutMs = 20_000),
+                contentType = ContentType.LIVE,
+            ),
+            PlaybackRequest(
+                "https://example.test/live",
+                network = PlaybackNetworkRequest(connectTimeoutMs = 16_000),
+                contentType = ContentType.LIVE,
+            ),
+            PlaybackRequest(
+                "https://example.test/live",
+                headers = mapOf("Authorization" to "secret"),
+                crossHostAuthorization = CrossHostAuthorization.STRIP,
+                contentType = ContentType.LIVE,
+            ),
+        )
+        requests.forEach { assertTrue(MpvAdapterPlanFactory.create(start(request = it)) is PlaybackResult.Failure) }
+    }
+
+    @Test
+    fun `application DNS request is admitted with an explicit system fallback`() {
+        val plan = plan(
+            start(
+                request = PlaybackRequest(
+                    "https://example.test/live",
+                    dnsPolicy = DnsPolicy.SHARED_APPLICATION_RESOLVER,
+                    applicationDnsKey = ApplicationDnsKey("provider-dns-a"),
+                    contentType = ContentType.LIVE,
+                ),
+            ),
+        )
+
+        assertEquals(MpvDnsMode.SYSTEM_FALLBACK_FOR_APPLICATION_DNS, plan.dnsMode)
+        assertTrue(plan.toString().contains("dnsMode=SYSTEM_FALLBACK_FOR_APPLICATION_DNS"))
+        assertFalse(plan.preInitOptions.containsKey("http-proxy"))
+    }
+
+    @Test
+    fun `system DNS request remains system DNS`() {
+        val plan = plan(start())
+
+        assertEquals(MpvDnsMode.SYSTEM, plan.dnsMode)
+    }
+
+    @Test
+    fun `direct rejects full-fidelity subtitles and software decode`() {
+        assertTrue(
+            MpvAdapterPlanFactory.create(
+                start(graph = graph(GraphOutputProfile.MPV_DIRECT, DecoderMode.HARDWARE)),
+            ) is PlaybackResult.Failure,
+        )
+        assertTrue(
+            MpvAdapterPlanFactory.create(
+                start(
+                    graph = graph(GraphOutputProfile.MPV_DIRECT, DecoderMode.SOFTWARE),
+                    requirements = requirements(subtitles = false),
+                ),
+            ) is PlaybackResult.Failure,
+        )
+    }
+
+    // Regression: the plan vetoed MPV_DIRECT whenever subtitles were enabled AT ALL, while graph
+    // selection (PlaybackPolicy) only excludes it for FULL fidelity — so with the default
+    // preferences (subtitles enabled, COMPATIBLE fidelity) every guide live tune selected
+    // MPV_DIRECT, was instantly rejected at engine start, and silently landed on Media3,
+    // neutralizing the live libmpv default on every device. The plan must mirror the policy:
+    // COMPATIBLE fidelity accepts that direct render cannot draw subtitles.
+    @Test
+    fun `direct admits compatible-fidelity subtitles and disables subtitle decode`() {
+        val plan = plan(
+            start(
+                graph = graph(GraphOutputProfile.MPV_DIRECT, DecoderMode.HARDWARE),
+                requirements = requirements(subtitles = true, fidelity = SubtitleFidelity.COMPATIBLE),
+            ),
+        )
+
+        assertEquals("mediacodec_embed", plan.preInitOptions["vo"])
+        assertEquals("no", plan.preInitOptions["sid"])
+    }
+
+    private fun plan(input: PlaybackEngineStart) =
+        (MpvAdapterPlanFactory.create(input) as PlaybackResult.Success).value
+
+    private fun start(
+        request: PlaybackRequest = PlaybackRequest("https://example.test/live", contentType = ContentType.LIVE),
+        graph: PlaybackGraph = graph(GraphOutputProfile.MPV_RENDER, DecoderMode.HARDWARE),
+        requirements: PlaybackRequirements = requirements(),
+    ) = PlaybackEngineStart(1, request, StreamEvidence(), graph, requirements, startPaused = false)
+
+    private fun graph(profile: GraphOutputProfile, decoder: DecoderMode) = PlaybackGraph(
+        id = "mpv",
+        engine = EngineType.LIBMPV,
+        outputProfile = profile,
+        decoderMode = decoder,
+        audioMode = AudioMode.DECODE,
+        surfaceMode = if (profile == GraphOutputProfile.MPV_DIRECT) SurfaceMode.NATIVE_EMBED else SurfaceMode.GPU_RENDER,
+    )
+
+    private fun requirements(
+        subtitles: Boolean = true,
+        fidelity: SubtitleFidelity = SubtitleFidelity.FULL,
+    ) = PlaybackRequirements(
+        profile = SessionProfile.FULLSCREEN,
+        priority = SessionPriority.QUALITY_AND_STABILITY,
+        qualityIntent = VideoQualityIntent.FULL,
+        displayModeSwitchAllowed = true,
+        frameRatePreference = FrameRatePreference.ON_COMMITTED_PLAYBACK,
+        hdrPreference = HdrPreference.AUTO,
+        decoderPreference = DecoderPreference.AUTO,
+        softwareDecodeFallbackAllowed = true,
+        subtitleFidelity = fidelity,
+        subtitlesEnabled = subtitles,
+        audioOutput = AudioOutputPreference.PCM,
+        pcmProcessingAllowed = true,
+        buffering = BufferingPreference.RECOMMENDED,
+        gpuRenderingAllowed = true,
+        eligibleEngines = setOf(EngineType.LIBMPV),
+        allowedSurfaceModes = setOf(SurfaceMode.NATIVE_EMBED, SurfaceMode.GPU_RENDER),
+        secureOutputRequired = false,
+        resourceBudget = ResourceBudget(),
+    )
+}

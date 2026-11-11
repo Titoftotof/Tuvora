@@ -1,0 +1,210 @@
+@file:OptIn(ExperimentalTvMaterial3Api::class)
+
+package com.nuvio.tv.ui.screens.home
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Border
+import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import com.nuvio.tv.R
+import com.nuvio.tv.core.announcements.AnnouncementPolicy
+import com.nuvio.tv.domain.model.Announcement
+import com.nuvio.tv.ui.components.QrHandOffDialog
+import com.nuvio.tv.ui.components.RestoreFocusOnClose
+import com.nuvio.tv.ui.theme.NuvioTheme
+
+/**
+ * Focuses the announcement card's first button; null while no card is showing. Provided by
+ * HomeScreen for layouts that consume Up themselves before HomeScreen's fallback can see it
+ * (Modern's expanded first-row card, UX80).
+ */
+internal val LocalHomeAnnouncementFocus = compositionLocalOf<(() -> Boolean)?> { null }
+
+/**
+ * Dismissible announcement card for the top of Home. It never requests focus itself (the layouts
+ * own initial focus on the first content row); it is reached with D-pad up, which HomeScreen routes
+ * to [ctaFocusRequester] when Up has nowhere else to go (UX80). That requester sits on the CTA, or on
+ * Dismiss when there is no CTA.
+ *
+ * TV has no reliable browser, so the CTA hands the link to the viewer's phone as a QR code, the
+ * same way About → Discord does ([QrHandOffDialog]).
+ */
+@Composable
+internal fun HomeAnnouncementCard(
+    announcement: Announcement,
+    onShowCta: (AnnouncementPolicy.Cta) -> Unit,
+    onDismiss: () -> Unit,
+    ctaFocusRequester: FocusRequester,
+    modifier: Modifier = Modifier,
+) {
+    val focusManager = LocalFocusManager.current
+    val cta = remember(announcement) { AnnouncementPolicy.cta(announcement) }
+
+    HomeNoticeCard(title = announcement.title, body = announcement.body, modifier = modifier) {
+        if (cta != null) {
+            AnnouncementButton(
+                text = cta.label,
+                onClick = { onShowCta(cta) },
+                modifier = Modifier.focusRequester(ctaFocusRequester),
+            )
+        }
+        AnnouncementButton(
+            text = stringResource(R.string.home_announcement_dismiss),
+            modifier = if (cta == null) Modifier.focusRequester(ctaFocusRequester) else Modifier,
+            onClick = {
+                // Hand focus to the content below before this card leaves the tree, so the
+                // D-pad never ends up on a removed node.
+                focusManager.moveFocus(FocusDirection.Down)
+                onDismiss()
+            },
+        )
+    }
+}
+
+/**
+ * Some Home rows (or an add-on's manifest) failed to load and the automatic retries gave up. Same
+ * floating card, slot and D-pad reach as the announcement (Up from the top row, UX80); Tuvora retries
+ * on every return to Home, Retry does it now, and Dismiss hides the card for this failure. Never takes
+ * focus by itself.
+ */
+@Composable
+internal fun HomeRowsFailedCard(
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+    retryFocusRequester: FocusRequester,
+    modifier: Modifier = Modifier,
+) {
+    val focusManager = LocalFocusManager.current
+    HomeNoticeCard(
+        title = stringResource(R.string.home_rows_failed_title),
+        body = stringResource(R.string.home_rows_failed_message),
+        modifier = modifier,
+    ) {
+        AnnouncementButton(
+            text = stringResource(R.string.action_retry),
+            modifier = Modifier.focusRequester(retryFocusRequester),
+            onClick = {
+                // The card hides while the retry runs; hand focus to the rows first, as Dismiss does.
+                focusManager.moveFocus(FocusDirection.Down)
+                onRetry()
+            },
+        )
+        AnnouncementButton(
+            text = stringResource(R.string.home_announcement_dismiss),
+            onClick = {
+                focusManager.moveFocus(FocusDirection.Down)
+                onDismiss()
+            },
+        )
+    }
+}
+
+/** The floating card shell shared by the announcement and the rows-failed notice. */
+@Composable
+private fun HomeNoticeCard(
+    title: String,
+    body: String,
+    modifier: Modifier = Modifier,
+    buttons: @Composable RowScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(NuvioTheme.radii.md)
+    Column(
+        modifier = modifier
+            .width(460.dp)
+            .border(NuvioTheme.spacing.hairline, NuvioTheme.colors.Border.copy(alpha = 0.35f), shape)
+            .background(NuvioTheme.colors.BackgroundElevated, shape)
+            .padding(NuvioTheme.spacing.lg),
+        verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            color = NuvioTheme.colors.TextPrimary,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (body.isNotBlank()) {
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodySmall,
+                color = NuvioTheme.colors.TextSecondary,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm), content = buttons)
+    }
+}
+
+@Composable
+private fun AnnouncementButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.colors(
+            containerColor = NuvioTheme.colors.BackgroundCard,
+            focusedContainerColor = NuvioTheme.colors.Secondary,
+            contentColor = NuvioTheme.colors.TextPrimary,
+            focusedContentColor = NuvioTheme.colors.OnSecondary,
+        ),
+        border = ButtonDefaults.border(
+            focusedBorder = Border(
+                border = NuvioTheme.focusRing.border(NuvioTheme.spacing.xxs),
+                shape = RoundedCornerShape(50),
+            )
+        ),
+        shape = ButtonDefaults.shape(RoundedCornerShape(50)),
+    ) {
+        Text(text = text, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * Full-screen QR hand-off for an announcement CTA. Hosted in its own dialog window so D-pad focus
+ * stays trapped in the overlay (it can't reach Home behind it) and Back closes it.
+ */
+@Composable
+internal fun HomeAnnouncementCtaQr(
+    cta: AnnouncementPolicy.Cta,
+    onClose: () -> Unit,
+) {
+    QrHandOffDialog(
+        url = cta.url,
+        instruction = stringResource(R.string.home_announcement_qr_instruction),
+        onClose = onClose,
+    )
+}
+
+/** Returns focus to the CTA after the QR overlay closes (the overlay's own button is gone). */
+@Composable
+internal fun RestoreAnnouncementCtaFocus(qrOpen: Boolean, ctaFocusRequester: FocusRequester) {
+    RestoreFocusOnClose(open = qrOpen, target = ctaFocusRequester)
+}

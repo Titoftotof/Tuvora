@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="profile_copy_iptv">IPTV connections and categories</string>
+    <string name="profile_copy_other_connections">Other provider connections</string>
+    <string name="profile_copy_preferences">Appearance, playback and home settings</string>
+    <string name="profile_copy_favorites">Local favorites and lists</string>
+    <string name="profile_copy_history">Local history and watch progress</string>
+    <string name="profile_copy_exclusions_v2">The name, avatar, PIN and main account session are not copied. Selected items above will be copied independently.</string>
+</resources>

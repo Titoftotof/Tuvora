@@ -1,0 +1,658 @@
+package com.nuvio.tv.playback.host
+
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.SurfaceView
+import android.view.TextureView
+import android.widget.FrameLayout
+import androidx.media3.exoplayer.ExoPlayer
+import com.nuvio.tv.playback.core.LiveFreezeFramePolicy
+import com.nuvio.tv.playback.core.PlaybackCommand
+import com.nuvio.tv.playback.core.PlaybackResult
+import com.nuvio.tv.playback.core.PlaybackSnapshot
+import com.nuvio.tv.playback.core.SurfaceMode
+import com.nuvio.tv.playback.media3.Media3SurfaceLease
+import com.nuvio.tv.playback.mpv.MpvSurfaceLease
+import com.nuvio.tv.playback.ui.PlaybackSessionController
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.After
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], application = android.app.Application::class)
+@LooperMode(LooperMode.Mode.PAUSED)
+class CleanLiveSurfaceCoordinatorTest {
+    private val scopes = mutableListOf<CoroutineScope>()
+
+    @After
+    fun tearDown() {
+        scopes.forEach { it.cancel() }
+    }
+
+    @Test
+    fun `capabilities advertise only explicitly constructible truthful modes`() {
+        val coordinator = coordinator(
+            modes = setOf(SurfaceMode.SURFACE_VIEW, SurfaceMode.NATIVE_EMBED),
+            secureSurfaceView = true,
+        )
+
+        assertTrue(coordinator.capabilities.surfaceViewSupported)
+        assertFalse(coordinator.capabilities.textureViewSupported)
+        assertTrue(coordinator.capabilities.nativeEmbedSupported)
+        assertFalse(coordinator.capabilities.gpuRenderingSupported)
+        assertTrue(coordinator.capabilities.secureSurfaceSupported)
+        assertFalse(coordinator.capabilities.secureNativeEmbedSupported)
+        assertFalse(coordinator.capabilities.secureGpuRenderingSupported)
+    }
+
+    @Test
+    fun `construction rejects empty modes and impossible secure claim`() {
+        assertIllegalArgument {
+            coordinator(modes = emptySet())
+        }
+        assertIllegalArgument {
+            coordinator(
+                modes = setOf(SurfaceMode.TEXTURE_VIEW),
+                secureSurfaceView = true,
+            )
+        }
+        assertIllegalArgument {
+            val occupiedOwner = owner().apply {
+                addView(android.view.View(context))
+            }
+            coordinator(
+                owner = occupiedOwner,
+                modes = setOf(SurfaceMode.SURFACE_VIEW),
+            )
+        }
+    }
+
+    @Test
+    fun `engine hosts reject cross-engine modes even when coordinator can construct them`() = runTest {
+        val coordinator = coordinator(modes = SurfaceMode.entries.toSet())
+        start(coordinator)
+
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.NATIVE_EMBED, secure = false))
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.GPU_RENDER, secure = false))
+        assertFailure(coordinator.mpvSurfaceHost.acquire(SurfaceMode.SURFACE_VIEW, secure = false))
+        assertFailure(coordinator.mpvSurfaceHost.acquire(SurfaceMode.TEXTURE_VIEW, secure = false))
+        assertFailure(coordinator.mpvSurfaceHost.acquire(SurfaceMode.NATIVE_EMBED, secure = true))
+    }
+
+    @Test
+    fun `binding is one shot and hosting fails closed before binding`() = runTest {
+        val commands = mutableListOf<PlaybackCommand>()
+        val coordinator = coordinator(modes = setOf(SurfaceMode.SURFACE_VIEW))
+
+        assertFalse(coordinator.startHosting())
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.SURFACE_VIEW, secure = false))
+        assertTrue(coordinator.bindController(controller(commands)))
+        assertFalse(coordinator.bindController(controller(mutableListOf())))
+        assertTrue(coordinator.startHosting())
+        assertEquals(listOf(PlaybackCommand.SurfaceAvailable), commands)
+    }
+
+    @Test
+    fun `Media3 owns exactly one requested raw child at a time`() = runTest {
+        val owner = owner()
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW, SurfaceMode.TEXTURE_VIEW),
+        )
+        start(coordinator)
+
+        val first = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        assertEquals(1, owner.childCount)
+        assertTrue(owner.getChildAt(0) is SurfaceView)
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.TEXTURE_VIEW, secure = false))
+        assertEquals(1, owner.childCount)
+
+        assertTrue(first.release())
+        val second = media3Lease(coordinator, SurfaceMode.TEXTURE_VIEW)
+        assertEquals(1, owner.childCount)
+        assertTrue(owner.getChildAt(0) is TextureView)
+        assertTrue(second.release())
+        assertEquals(0, owner.childCount)
+    }
+
+    @Test
+    fun `Media3 lease reports exact requested secure fact`() = runTest {
+        val coordinator = coordinator(
+            modes = setOf(SurfaceMode.SURFACE_VIEW, SurfaceMode.TEXTURE_VIEW),
+            secureSurfaceView = true,
+        )
+        start(coordinator)
+
+        val nonSecure = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW, secure = false)
+        assertFalse(nonSecure.secure)
+        assertTrue(nonSecure.release())
+
+        val secure = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW, secure = true)
+        assertTrue(secure.secure)
+        assertTrue(secure.release())
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.TEXTURE_VIEW, secure = true))
+    }
+
+    @Test
+    fun `Media3 detach requires affirmative renderer release proof`() = runTest {
+        val owner = owner()
+        val coordinator = coordinator(owner, setOf(SurfaceMode.SURFACE_VIEW))
+        start(coordinator)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        val player = mockk<ExoPlayer>(relaxed = true)
+        every { player.clearVideoSurfaceWithResult() } returns false
+
+        lease.attach(player)
+        assertFalse(lease.detach(player))
+        assertFalse(lease.release())
+        assertEquals(1, owner.childCount)
+        verify(exactly = 1) { player.clearVideoSurfaceWithResult() }
+
+        lease.confirmPlayerReleased()
+        assertTrue(lease.release())
+        assertEquals(0, owner.childCount)
+    }
+
+    @Test
+    fun `affirmative Media3 detach permits surface release`() = runTest {
+        val owner = owner()
+        val coordinator = coordinator(owner, setOf(SurfaceMode.SURFACE_VIEW))
+        start(coordinator)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        val player = mockk<ExoPlayer>(relaxed = true)
+        every { player.clearVideoSurfaceWithResult() } returns true
+
+        lease.attach(player)
+        assertTrue(lease.detach(player))
+        assertTrue(lease.release())
+        assertEquals(0, owner.childCount)
+    }
+
+    @Test
+    fun `libmpv native embed and GPU render have distinct Android backing`() = runTest {
+        val owner = owner()
+        val surface = validSurface()
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.NATIVE_EMBED, SurfaceMode.GPU_RENDER),
+            mpvSurfaceFactory = { surface },
+        )
+        start(coordinator)
+
+        val native = mpvLease(coordinator, SurfaceMode.NATIVE_EMBED)
+        assertTrue(owner.getChildAt(0) is SurfaceView)
+        assertEquals(SurfaceMode.NATIVE_EMBED, native.mode)
+        assertFalse(native.secure)
+        assertTrue(native.release())
+        drainMain()
+        verify(exactly = 0) { surface.release() }
+
+        val gpu = mpvLease(coordinator, SurfaceMode.GPU_RENDER)
+        assertTrue(owner.getChildAt(0) is TextureView)
+        assertEquals(SurfaceMode.GPU_RENDER, gpu.mode)
+        assertFalse(gpu.secure)
+        assertTrue(gpu.release())
+        drainMain()
+        verify(exactly = 1) { surface.release() }
+        assertEquals(0, owner.childCount)
+    }
+
+    @Test
+    fun `decoder-scaled surfaces are shaped to the video display aspect`() = runTest {
+        // MediaCodec ignores pixel aspect when drawing to a Surface, and mpv's mediacodec_embed
+        // does no aspect handling, so Media3 and native-embed surfaces must be shaped by us.
+        val owner = owner().apply { layoutAs(1920, 1080) }
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW, SurfaceMode.NATIVE_EMBED, SurfaceMode.GPU_RENDER),
+        )
+        start(coordinator)
+
+        val media3 = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        coordinator.applyVideoAspect(4f / 3f)
+        assertEquals(0.75f, owner.getChildAt(0).scaleX, 0.0001f)
+        assertEquals(1f, owner.getChildAt(0).scaleY, 0f)
+
+        coordinator.applyVideoAspect(null)
+        assertEquals("unknown aspect keeps the last geometry", 0.75f, owner.getChildAt(0).scaleX, 0.0001f)
+        assertTrue(media3.release())
+
+        val native = mpvLease(coordinator, SurfaceMode.NATIVE_EMBED)
+        assertEquals("a zap's new surface keeps the last shape", 0.75f, owner.getChildAt(0).scaleX, 0.0001f)
+        coordinator.applyVideoAspect(16f / 9f)
+        assertEquals(1f, owner.getChildAt(0).scaleX, 0f)
+        assertTrue(native.release())
+        drainMain()
+
+        coordinator.applyVideoAspect(4f / 3f)
+        val gpu = mpvLease(coordinator, SurfaceMode.GPU_RENDER)
+        assertEquals("mpv letterboxes its own GPU output", 1f, owner.getChildAt(0).scaleX, 0f)
+        assertTrue(gpu.release())
+        drainMain()
+    }
+
+    @Test
+    fun `the last captured frame covers an interruption and lifts on the next real frame`() = runTest {
+        // Owner rule: live never shows black. The frozen frame must survive the surface being torn
+        // down (reconnect/handoff remove the view) and must sit above any replacement surface.
+        val owner = owner().apply { layoutAs(1920, 1080) }
+        val captures = mutableListOf<android.view.View>()
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW),
+            frameCapturer = SurfaceFrameCapturer { view, into, done ->
+                captures += view
+                into.eraseColor(android.graphics.Color.RED)
+                done(true)
+            },
+        )
+        start(coordinator)
+        val first = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        coordinator.applyVideoAspect(4f / 3f)
+
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.FROZEN)
+        assertEquals("nothing captured yet: nothing to show", 1, owner.childCount)
+
+        coordinator.captureFrame()
+        assertEquals(listOf<android.view.View>(owner.getChildAt(0)), captures)
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.FROZEN)
+        val overlay = owner.getChildAt(owner.childCount - 1) as android.widget.ImageView
+        assertEquals(android.view.View.VISIBLE, overlay.visibility)
+        assertEquals("the frozen frame keeps the picture's shape", 0.75f, overlay.scaleX, 0.0001f)
+
+        assertTrue(first.release())
+        assertEquals("the frame outlives the torn-down surface", android.view.View.VISIBLE, overlay.visibility)
+
+        val second = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        assertTrue("the frame stays above the new surface", owner.getChildAt(owner.childCount - 1) === overlay)
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.HIDDEN)
+        assertEquals(android.view.View.GONE, overlay.visibility)
+
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.DIMMED)
+        assertEquals(android.view.View.VISIBLE, overlay.visibility)
+        assertTrue("a failure dims the frame under the error", overlay.alpha < 1f)
+
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.CLEARED)
+        assertEquals(android.view.View.GONE, overlay.visibility)
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.FROZEN)
+        assertEquals("a cleared frame is never shown again", android.view.View.GONE, overlay.visibility)
+        assertTrue(second.release())
+    }
+
+    @Test
+    fun `a failed capture keeps the previous good frame`() = runTest {
+        val owner = owner().apply { layoutAs(1920, 1080) }
+        var succeed = true
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW),
+            frameCapturer = SurfaceFrameCapturer { _, into, done ->
+                if (succeed) into.eraseColor(android.graphics.Color.GREEN) else into.eraseColor(android.graphics.Color.BLACK)
+                done(succeed)
+            },
+        )
+        start(coordinator)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        coordinator.captureFrame()
+        succeed = false
+        coordinator.captureFrame()
+        coordinator.presentFreezeFrame(LiveFreezeFramePolicy.Overlay.FROZEN)
+
+        val overlay = owner.getChildAt(owner.childCount - 1) as android.widget.ImageView
+        val shown = (overlay.drawable as android.graphics.drawable.BitmapDrawable).bitmap
+        assertEquals(android.graphics.Color.GREEN, shown.getPixel(0, 0))
+        assertTrue(lease.release())
+    }
+
+    @Test
+    fun `the shape follows the box when the guide pane promotes to fullscreen`() = runTest {
+        val owner = owner().apply { layoutAs(640, 360) }
+        val coordinator = coordinator(owner = owner, modes = setOf(SurfaceMode.SURFACE_VIEW))
+        start(coordinator)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        coordinator.applyVideoAspect(4f / 3f)
+        assertEquals(0.75f, owner.getChildAt(0).scaleX, 0.0001f)
+
+        owner.layoutAs(1920, 800)
+        assertEquals(
+            (4f / 3f) / (1920f / 800f),
+            owner.getChildAt(0).scaleX,
+            0.0001f,
+        )
+        assertTrue(lease.release())
+    }
+
+    @Test
+    fun `libmpv attached lease cannot release without detach proof`() = runTest {
+        val coordinator = coordinator(
+            modes = setOf(SurfaceMode.NATIVE_EMBED),
+            mpvSurfaceFactory = { validSurface() },
+        )
+        start(coordinator)
+        val lease = mpvLease(coordinator, SurfaceMode.NATIVE_EMBED)
+
+        lease.markAttached()
+        assertFalse(lease.release())
+        lease.confirmDetached()
+        assertTrue(lease.release())
+    }
+
+    @Test
+    fun `stale surface callbacks cannot report unavailable for replacement`() = runTest {
+        val commands = mutableListOf<PlaybackCommand>()
+        val owner = owner()
+        val coordinator = coordinator(owner, setOf(SurfaceMode.TEXTURE_VIEW))
+        start(coordinator, commands)
+        val oldLease = media3Lease(coordinator, SurfaceMode.TEXTURE_VIEW)
+        val oldListener = (owner.getChildAt(0) as TextureView).surfaceTextureListener
+        assertTrue(oldLease.release())
+        media3Lease(coordinator, SurfaceMode.TEXTURE_VIEW)
+
+        oldListener!!.onSurfaceTextureDestroyed(mockk<SurfaceTexture>())
+        drainMain()
+
+        assertEquals(listOf(PlaybackCommand.SurfaceAvailable), commands)
+        assertEquals(1, owner.childCount)
+    }
+
+    @Test
+    fun `lost GPU texture stays alive until renderer detach is acknowledged`() = runTest {
+        val owner = owner()
+        val surface = validSurface()
+        val texture = mockk<SurfaceTexture>(relaxed = true)
+        val coordinator = coordinator(owner, setOf(SurfaceMode.GPU_RENDER), mpvSurfaceFactory = { surface })
+        start(coordinator)
+        val lease = mpvLease(coordinator, SurfaceMode.GPU_RENDER)
+        lease.markAttached()
+        val listener = (owner.getChildAt(0) as TextureView).surfaceTextureListener!!
+
+        assertFalse("Framework must not dispose a texture still owned by libmpv", listener.onSurfaceTextureDestroyed(texture))
+        verify(exactly = 0) { texture.release() }
+        assertFalse(lease.release())
+        assertFalse(coordinator.disposeAfterSessionRelease())
+        verify(exactly = 0) { surface.release() }
+
+        lease.confirmDetached()
+        assertTrue(lease.release())
+        drainMain()
+        io.mockk.verifyOrder { surface.release(); texture.release() }
+        verify(exactly = 1) { texture.release() }
+        assertEquals(0, owner.childCount)
+        assertTrue(lease.release())
+        verify(exactly = 1) { texture.release() }
+    }
+
+    @Test
+    fun `stopping host notifications cannot dispose an attached GPU texture early`() = runTest {
+        val owner = owner()
+        val texture = mockk<SurfaceTexture>(relaxed = true)
+        val coordinator = coordinator(owner, setOf(SurfaceMode.GPU_RENDER))
+        start(coordinator)
+        val lease = mpvLease(coordinator, SurfaceMode.GPU_RENDER)
+        lease.markAttached()
+        val listener = (owner.getChildAt(0) as TextureView).surfaceTextureListener!!
+        coordinator.stopHosting()
+
+        assertFalse(listener.onSurfaceTextureDestroyed(texture))
+        verify(exactly = 0) { texture.release() }
+        lease.confirmCoreDestroyed()
+        assertTrue(lease.release())
+        drainMain()
+        verify(exactly = 1) { texture.release() }
+    }
+
+    @Test
+    fun `actually removed surface publishes host readiness and replacement recovers`() = runTest {
+        val commands = mutableListOf<PlaybackCommand>()
+        val owner = owner()
+        val coordinator = coordinator(owner, setOf(SurfaceMode.TEXTURE_VIEW))
+        start(coordinator, commands)
+        val lease = media3Lease(coordinator, SurfaceMode.TEXTURE_VIEW)
+        val oldView = owner.getChildAt(0) as TextureView
+        val listener = oldView.surfaceTextureListener!!
+        val texture = mockk<SurfaceTexture>()
+
+        listener.onSurfaceTextureDestroyed(texture)
+        drainMain()
+        assertTrue(lease.release())
+        drainMain()
+
+        assertEquals(0, owner.childCount)
+        val replacement = media3Lease(coordinator, SurfaceMode.TEXTURE_VIEW)
+        val newView = owner.getChildAt(0)
+        assertTrue(newView !== oldView)
+        assertTrue(replacement.release())
+
+        assertEquals(
+            listOf(
+                PlaybackCommand.SurfaceAvailable,
+                PlaybackCommand.SurfaceUnavailable,
+                PlaybackCommand.SurfaceAvailable,
+            ),
+            commands,
+        )
+    }
+
+    @Test
+    fun `controlled surface release does not emit surface unavailable`() = runTest {
+        val commands = mutableListOf<PlaybackCommand>()
+        val coordinator = coordinator(modes = setOf(SurfaceMode.SURFACE_VIEW))
+        start(coordinator, commands)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+
+        assertTrue(lease.release())
+        drainMain()
+
+        assertEquals(listOf(PlaybackCommand.SurfaceAvailable), commands)
+    }
+
+    @Test
+    fun `surface wait is bounded and failed acquisition removes child`() = runTest {
+        var observedTimeout = -1L
+        val owner = owner()
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW),
+            surfaceWaitTimeoutMs = 41L,
+            awaitSurfaceValidity = { _, timeout ->
+                observedTimeout = timeout
+                false
+            },
+        )
+        start(coordinator)
+
+        assertFailure(coordinator.media3SurfaceHost.acquire(SurfaceMode.SURFACE_VIEW, secure = false))
+        assertEquals(41L, observedTimeout)
+        assertEquals(0, owner.childCount)
+    }
+
+    @Test
+    fun `cancelled Media3 acquisition mid surface wait must not orphan the slot`() = runTest {
+        val owner = owner()
+        val waitStarted = CompletableDeferred<Unit>()
+        var validityWaits = 0
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.SURFACE_VIEW),
+            awaitSurfaceValidity = { _, _ ->
+                if (++validityWaits == 1) {
+                    waitStarted.complete(Unit)
+                    awaitCancellation()
+                } else {
+                    true
+                }
+            },
+        )
+        start(coordinator)
+
+        // A release barrier (HOME, zap) cancels the generation scope while the attach is still
+        // waiting for the surface to become valid — the field-repro path for the dead guide.
+        val acquisition = launch {
+            coordinator.media3SurfaceHost.acquire(SurfaceMode.SURFACE_VIEW, secure = false)
+        }
+        waitStarted.await()
+        acquisition.cancelAndJoin()
+
+        assertEquals("cancelled acquisition must remove its child", 0, owner.childCount)
+        val next = coordinator.media3SurfaceHost.acquire(SurfaceMode.SURFACE_VIEW, secure = false)
+        assertTrue(
+            "next acquire after a cancelled acquisition must succeed: $next",
+            next is PlaybackResult.Success,
+        )
+    }
+
+    @Test
+    fun `cancelled libmpv acquisition mid surface wait must not orphan the slot`() = runTest {
+        val owner = owner()
+        val waitStarted = CompletableDeferred<Unit>()
+        var validityWaits = 0
+        val coordinator = coordinator(
+            owner = owner,
+            modes = setOf(SurfaceMode.NATIVE_EMBED),
+            awaitSurfaceValidity = { _, _ ->
+                if (++validityWaits == 1) {
+                    waitStarted.complete(Unit)
+                    awaitCancellation()
+                } else {
+                    true
+                }
+            },
+        )
+        start(coordinator)
+
+        val acquisition = launch {
+            coordinator.mpvSurfaceHost.acquire(SurfaceMode.NATIVE_EMBED, secure = false)
+        }
+        waitStarted.await()
+        acquisition.cancelAndJoin()
+
+        assertEquals("cancelled acquisition must remove its child", 0, owner.childCount)
+        val next = coordinator.mpvSurfaceHost.acquire(SurfaceMode.NATIVE_EMBED, secure = false)
+        assertTrue(
+            "next acquire after a cancelled acquisition must succeed: $next",
+            next is PlaybackResult.Success,
+        )
+    }
+
+    @Test
+    fun `dispose fails closed while renderer still owns surface`() = runTest {
+        val coordinator = coordinator(modes = setOf(SurfaceMode.SURFACE_VIEW))
+        start(coordinator)
+        val lease = media3Lease(coordinator, SurfaceMode.SURFACE_VIEW)
+        val player = mockk<ExoPlayer>(relaxed = true)
+        lease.attach(player)
+
+        assertFalse(coordinator.disposeAfterSessionRelease())
+        lease.confirmPlayerReleased()
+        assertTrue(lease.release())
+        assertTrue(coordinator.disposeAfterSessionRelease())
+        assertFalse(coordinator.startHosting())
+    }
+
+    private fun coordinator(
+        owner: FrameLayout = owner(),
+        modes: Set<SurfaceMode>,
+        secureSurfaceView: Boolean = false,
+        surfaceWaitTimeoutMs: Long = 100L,
+        awaitSurfaceValidity: suspend (android.view.View, Long) -> Boolean = { _, _ -> true },
+        mpvSurfaceFactory: (android.view.View) -> Surface? = { validSurface() },
+        frameCapturer: SurfaceFrameCapturer = SurfaceFrameCapturer { _, _, done -> done(false) },
+    ) = CleanLiveSurfaceCoordinator(
+        owner = owner,
+        callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also(scopes::add),
+        constructibleModes = modes,
+        secureMedia3SurfaceViewSupported = secureSurfaceView,
+        mainDispatcher = Dispatchers.Unconfined,
+        surfaceWaitTimeoutMs = surfaceWaitTimeoutMs,
+        awaitSurfaceValidity = awaitSurfaceValidity,
+        mpvSurfaceFactory = mpvSurfaceFactory,
+        frameCapturer = frameCapturer,
+    )
+
+    private fun owner() = FrameLayout(RuntimeEnvironment.getApplication())
+
+    private fun FrameLayout.layoutAs(width: Int, height: Int) {
+        measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY),
+        )
+        layout(0, 0, width, height)
+    }
+
+    private fun controller(commands: MutableList<PlaybackCommand>) = PlaybackSessionController(
+        snapshot = MutableStateFlow(PlaybackSnapshot()),
+        dispatchCommand = commands::add,
+        releaseSession = {},
+    )
+
+    private suspend fun start(
+        coordinator: CleanLiveSurfaceCoordinator,
+        commands: MutableList<PlaybackCommand> = mutableListOf(),
+    ) {
+        assertTrue(coordinator.bindController(controller(commands)))
+        assertTrue(coordinator.startHosting())
+    }
+
+    private suspend fun media3Lease(
+        coordinator: CleanLiveSurfaceCoordinator,
+        mode: SurfaceMode,
+        secure: Boolean = false,
+    ): Media3SurfaceLease = when (val result = coordinator.media3SurfaceHost.acquire(mode, secure)) {
+        is PlaybackResult.Success -> result.value
+        is PlaybackResult.Failure -> throw AssertionError(
+            "Expected Media3 surface lease: ${result.failure.code}",
+        )
+    }
+
+    private suspend fun mpvLease(
+        coordinator: CleanLiveSurfaceCoordinator,
+        mode: SurfaceMode,
+    ): MpvSurfaceLease = when (val result = coordinator.mpvSurfaceHost.acquire(mode, secure = false)) {
+        is PlaybackResult.Success -> result.value
+        is PlaybackResult.Failure -> throw AssertionError(
+            "Expected libmpv surface lease: ${result.failure.code}",
+        )
+    }
+
+    private fun assertFailure(result: PlaybackResult<*>) {
+        assertTrue(result is PlaybackResult.Failure)
+    }
+
+    private fun assertIllegalArgument(block: () -> Unit) {
+        try {
+            block()
+            fail("Expected IllegalArgumentException")
+        } catch (_: IllegalArgumentException) {
+            Unit
+        }
+    }
+
+    private fun validSurface(): Surface = mockk(relaxed = true) {
+        every { isValid } returns true
+    }
+
+    private fun drainMain() {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+}

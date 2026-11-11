@@ -1,0 +1,273 @@
+name: Release
+
+# Production release. Triggered by pushing a tag like v1.2.3 (or run manually with a version).
+# Builds the SIGNED release APK + AAB and publishes them to a GitHub Release.
+#
+# Required repo secrets (set once — see the release notes):
+#   RELEASE_KEYSTORE_BASE64   base64 of your release keystore (.jks)
+#   RELEASE_STORE_PASSWORD    keystore password
+#   RELEASE_KEY_ALIAS         key alias
+#   RELEASE_KEY_PASSWORD      key password
+#   SUPABASE_URL / SUPABASE_ANON_KEY   (optional) bake login into the release
+#   POSTHOG_CLI_API_KEY  personal key with Error Tracking write + organization read
+#
+# Play Store upload AAB (playstore flavor) signs with a SEPARATE dedicated key —
+# the GitHub-release key must never change (the in-app updater needs signature
+# continuity), while the Play upload key is rotatable via Play App Signing:
+#   PLAY_UPLOAD_KEYSTORE_BASE64 / PLAY_UPLOAD_STORE_PASSWORD
+#   PLAY_UPLOAD_KEY_ALIAS / PLAY_UPLOAD_KEY_PASSWORD
+#
+# The playstore AAB is then published to Google Play automatically via the Play
+# Developer API (service account json in PLAY_SERVICE_ACCOUNT_JSON). A tag push
+# publishes to the single production track.
+# Production access is already enabled for these apps.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, e.g. 1.2.3 (creates tag v<version>)'
+        required: true
+      play_track:
+        description: 'Google Play track to publish the AAB to'
+        required: true
+        default: production
+        type: choice
+        options: [production]
+      announce:
+        description: Send community announcements
+        type: boolean
+        default: false
+      play_manual_review:
+        description: Save Play changes for review in Play Console when automatic submission is unavailable
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      POSTHOG_CLI_HOST: https://us.posthog.com
+      POSTHOG_CLI_PROJECT_ID: '494529'
+      POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle (deps + build cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The default list includes the long-deprecated 'tools' package, which cmdline-tools 16.0
+          # (runner image, 2026-09) no longer ships -> sdkmanager exits 1. The next step installs the rest.
+          packages: platform-tools
+
+      - name: Install SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install PostHog symbol uploader
+        run: |
+          test -n "$POSTHOG_CLI_API_KEY" || { echo "POSTHOG_CLI_API_KEY is required" >&2; exit 1; }
+          npm install --global @posthog/cli@0.10.0
+
+      - name: Decode signing keystore
+        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/release.jks"
+
+      - name: Configure local.properties
+        run: |
+          {
+            echo "NUVIO_RELEASE_STORE_FILE=$GITHUB_WORKSPACE/release.jks"
+            echo "NUVIO_RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}"
+            echo "NUVIO_RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}"
+            echo "NUVIO_RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}"
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+            echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}"
+            echo "TRAKT_CLIENT_ID=${{ secrets.TRAKT_CLIENT_ID }}"
+            echo "TRAKT_CLIENT_SECRET=${{ secrets.TRAKT_CLIENT_SECRET }}"
+            echo "SIMKL_CLIENT_ID=${{ secrets.SIMKL_CLIENT_ID }}"
+            echo "SIMKL_CLIENT_SECRET=${{ secrets.SIMKL_CLIENT_SECRET }}"
+            echo "DONATIONS_DONATE_URL=${{ secrets.DONATIONS_DONATE_URL }}"
+          } >> local.properties
+
+      - name: Verify local.properties keys reached the build
+        run: |
+          # Names only - never values. Proves whether the credential lines are present
+          # at the moment Gradle reads the file, which a masked echo cannot.
+          echo "keys in local.properties:"
+          sed -n 's/^\([A-Za-z0-9_]*\)=.*/  \1/p' local.properties | sort
+          for k in SIMKL_CLIENT_ID SIMKL_CLIENT_SECRET TRAKT_CLIENT_ID DONATIONS_DONATE_URL; do
+            v=$(sed -n "s/^$k=//p" local.properties | head -1)
+            echo "  $k length=${#v}"
+          done
+
+      - name: Raise Gradle heap
+        run: printf '\norg.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8\n' >> gradle.properties
+
+      - name: Build signed release APK + AAB
+        env:
+          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/release.jks
+          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          # Assemble and bundle in SEPARATE invocations. The ABI splits are gated
+          # `isEnable = !buildingAppBundle`, and buildingAppBundle is true whenever ANY task name
+          # contains "bundle" — so assembling + bundling together disables the splits for the whole
+          # build and produces a single un-split APK (no per-ABI, no universal), which broke Collect
+          # artifacts on the v1.6.0 release. Keeping them separate: assemble gets splits ON (per-ABI +
+          # universal sideload APKs), bundle gets splits OFF (the fullRelease AAB carries every ABI).
+          ./gradlew :app:assembleFullRelease \
+            -PversionNameOverride="${{ steps.ver.outputs.version }}" \
+            -PversionCodeOverride="${{ github.run_number }}" --stacktrace
+          ./gradlew :app:bundleFullRelease \
+            -PversionNameOverride="${{ steps.ver.outputs.version }}" \
+            -PversionCodeOverride="${{ github.run_number }}" --stacktrace
+
+      - name: Decode Play upload keystore
+        run: echo "${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/play-upload.jks"
+
+      - name: Build Play Store AAB (playstore flavor, dedicated upload key)
+        env:
+          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/play-upload.jks
+          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_STORE_PASSWORD }}
+          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:bundlePlaystoreRelease \
+            -PversionNameOverride="${{ steps.ver.outputs.version }}" \
+            -PversionCodeOverride="${{ github.run_number }}" --stacktrace
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          # Primary sideload asset — the arm-only UNIVERSAL APK, selected by EXACT name.
+          # tuvora.co/tv and the aftv.news Downloader code both point at this exact filename
+          # (see the pointer step below), so it must install on every real Android TV device:
+          # arm64-v8a AND 32-bit armeabi-v7a (e.g. the Onn 4K). The universal carries both.
+          # NEVER select with `find ... | head -1`: with ABI splits enabled that returns a
+          # non-deterministic per-ABI APK and could ship an ARM-incompatible (x86_64) build to
+          # every real TV — "App not installed" for all of them.
+          cp "app/build/outputs/apk/full/release/app-full-universal-release.apk" \
+            "dist/Tuvora-TV-${{ steps.ver.outputs.version }}.apk"
+          # Smaller per-ABI alternates (~72 MB vs the universal's ~130 MB) for users who know
+          # their device. Linked from the release notes; the Downloader code stays on the
+          # universal so a wrong pick can never brick the one-tap install.
+          cp "app/build/outputs/apk/full/release/app-full-arm64-v8a-release.apk" \
+            "dist/Tuvora-TV-${{ steps.ver.outputs.version }}-arm64-v8a.apk"
+          cp "app/build/outputs/apk/full/release/app-full-armeabi-v7a-release.apk" \
+            "dist/Tuvora-TV-${{ steps.ver.outputs.version }}-armeabi-v7a.apk"
+          cp "$(find app/build/outputs/bundle/fullRelease -name '*.aab' | head -1)" "dist/Tuvora-TV-${{ steps.ver.outputs.version }}.aab"
+          cp "$(find app/build/outputs/bundle/playstoreRelease -name '*.aab' | head -1)" "dist/Tuvora-TV-${{ steps.ver.outputs.version }}-playstore.aab"
+          ls -la dist
+
+      - name: Publish GitHub Release
+        id: github_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" dist/* \
+            --title "Tuvora TV ${{ steps.ver.outputs.version }}" \
+            --generate-notes || \
+          gh release upload "${{ steps.ver.outputs.tag }}" dist/* --clobber
+
+      # Play publishing runs LAST on purpose. It used to sit before the GitHub release,
+      # so a Play rejection (a re-run reuses github.run_number, and Play refuses a
+      # duplicate version code) skipped the release upload entirely and the artifacts
+      # were silently never replaced. Artifacts first; Play failures still fail the job.
+      - name: Publish AAB to Google Play
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.tuvora.tv
+          releaseFiles: app/build/outputs/bundle/playstoreRelease/*.aab
+          # All releases use the single production track.
+          tracks: ${{ github.event.inputs.play_track || 'production' }}
+          status: completed
+          changesNotSentForReview: ${{ inputs.play_manual_review || false }}
+
+      # The download links people actually use — tuvora.co/tv, and the aftv.news Downloader code
+      # pointing at it — are not a lookup. The site serves whatever a release last told it, so tell
+      # it now. This is the step that makes a released build reachable; if it fails the release is
+      # published but the short URL still serves the previous build, so it fails the job loudly.
+      - name: Publish the download pointer to tuvora.co
+        if: ${{ !cancelled() && steps.github_release.outcome == 'success' }}
+        env:
+          RELEASE_TOKEN: ${{ secrets.TUVORA_RELEASE_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::warning::TUVORA_RELEASE_TOKEN is not set — tuvora.co/tv will keep serving the previous build"
+            exit 0
+          fi
+          ASSET="Tuvora-TV-${VERSION}.apk"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ASSET}"
+          curl -fsS -X POST "https://tuvora.co/api/releases" \
+            -H "authorization: Bearer $RELEASE_TOKEN" \
+            -H "content-type: application/json" \
+            -d "$(jq -n --arg p "tv" --arg t "$TAG" --arg u "$URL" --arg n "$ASSET" \
+                  '{platform:$p, tag:$t, asset_url:$u, asset_name:$n}')"
+          echo
+
+          # One request, no retry loop: the pointer is stored, not cached, so it is either right now
+          # or something is wrong.
+          TARGET=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 20 "https://tuvora.co/tv")
+          echo "https://tuvora.co/tv -> $TARGET"
+          case "$TARGET" in
+            *"/download/${TAG}/"*) echo "✅ tuvora.co/tv serves ${TAG}" ;;
+            *) echo "::error::tuvora.co/tv serves '$TARGET', not ${TAG}"; exit 1 ;;
+          esac
+
+      # Community announcements — no-ops until the DISCORD_/TELEGRAM_ secrets exist.
+      # Never fails the release (all curl errors are swallowed).
+      - name: Announce release (Discord + Telegram)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.announce }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          MSG=$(printf '%s\n' \
+            "Tuvora TV ${VERSION} is out! 🎉" \
+            "" \
+            "⬇️ APK: https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" \
+            "🏪 Play beta: join https://groups.google.com/g/tuvora-testers then https://play.google.com/apps/testing/com.tuvora.tv" \
+            "📖 Guides: https://tuvora.co/guides")
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            jq -n --arg c "$MSG" '{content: $c}' | \
+              curl -fsS -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK_URL" \
+              || echo "::warning::Discord announce failed"
+          else
+            echo "DISCORD_WEBHOOK_URL not set - skipping Discord announce"
+          fi
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode text="$MSG" >/dev/null \
+              || echo "::warning::Telegram announce failed"
+          else
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set - skipping Telegram announce"
+          fi

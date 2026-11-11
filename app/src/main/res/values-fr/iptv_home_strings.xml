@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="iptv_home_categories_title">Catégories IPTV sur l’accueil</string>
+    <string name="iptv_home_categories_hint">Choisissez les fournisseurs et les catégories de films ou de séries. Enregistrement automatique.</string>
+    <string name="iptv_home_loading">Chargement…</string>
+    <string name="iptv_home_movies">Films</string>
+    <string name="iptv_home_series">Séries</string>
+    <string name="iptv_home_filter">Filtrer les catégories</string>
+    <string name="iptv_home_empty">Aucune catégorie trouvée</string>
+    <string name="iptv_home_no_provider">Ajoutez ou activez d’abord un fournisseur IPTV.</string>
+    <string name="iptv_home_order">Ordonner les catégories sélectionnées</string>
+    <string name="iptv_home_move_up">Monter</string>
+    <string name="iptv_home_move_down">Descendre</string>
+    <string name="iptv_home_remove">Retirer</string>
+    <string name="iptv_home_back">Retour</string>
+    <string name="iptv_home_save_failed">Enregistrement impossible. Réessayez.</string>
+</resources>

@@ -1,0 +1,111 @@
+package com.nuvio.tv.playback.wiring
+
+import android.util.Log
+import com.nuvio.tv.BuildConfig
+import com.nuvio.tv.playback.core.PlaybackDiagnosticEvent
+import com.nuvio.tv.playback.core.PlaybackDiagnostics
+import com.nuvio.tv.playback.core.PlaybackDiagnosticCode
+import com.nuvio.tv.playback.core.PlaybackQualitySummary
+import com.nuvio.tv.core.analytics.PostHogPrivacy
+import com.posthog.PostHog
+
+data class FormattedPlaybackDiagnostic(
+    val eventName: String,
+    val properties: Map<String, Any>,
+)
+
+/** Last-mile formatter whose inputs expose no endpoint, provider, account, or request secret. */
+object PlaybackDiagnosticFormatter {
+    fun format(event: PlaybackDiagnosticEvent): FormattedPlaybackDiagnostic {
+        val properties = linkedMapOf<String, Any>(
+            "schema_version" to 1,
+            "generation" to event.generation,
+            "diagnostic_code" to event.code.name,
+        )
+        event.engine?.let { properties["engine"] = it.name }
+        event.outputProfile?.let { properties["output_profile"] = it.name }
+        event.attempt?.let { properties["attempt"] = it }
+        event.outputStatus?.let { properties["output_status"] = it.name }
+        event.releaseReason?.let { properties["release_reason"] = it.name }
+        event.highResolution?.let { properties["high_resolution"] = it }
+        event.changeImpact?.let { properties["change_impact"] = it.name }
+        event.changedFields?.let { fields ->
+            properties["changed_fields"] = fields.map { it.name }.sorted().joinToString(",")
+        }
+        event.failure?.let { failure ->
+            properties["failure_code"] = failure.code.name
+            properties["failure_domain"] = failure.domain.name
+            properties["failure_phase"] = failure.phase.name
+            properties["retryability"] = failure.retryability.name
+            properties["deterministic"] = failure.deterministic
+        }
+        return FormattedPlaybackDiagnostic(
+            "clean_playback_diagnostic",
+            PostHogPrivacy.sanitize(properties),
+        )
+    }
+}
+
+fun interface PlaybackDiagnosticSink {
+    fun capture(event: FormattedPlaybackDiagnostic)
+}
+
+class FormattingPlaybackDiagnostics(
+    private val sink: PlaybackDiagnosticSink,
+) : PlaybackDiagnostics {
+    override fun record(event: PlaybackDiagnosticEvent) {
+        val formatted = PlaybackDiagnosticFormatter.format(event)
+        // TV's debug flavor is intentionally non-debuggable, so BuildConfig.DEBUG is false.
+        // IS_DEBUG_BUILD tracks the build flavor and keeps secret-safe playback diagnostics
+        // available in simulator/device validation builds only.
+        if (BuildConfig.IS_DEBUG_BUILD) {
+            // The formatter has a closed, secret-free schema: no URL, host, account, provider,
+            // channel, request header, cookie, or DRM value can cross this debug boundary.
+            Log.d(DEBUG_LOG_TAG, "${formatted.eventName} ${formatted.properties}")
+        }
+        sink.capture(formatted)
+    }
+
+    private companion object {
+        const val DEBUG_LOG_TAG = "CleanPlaybackDiag"
+    }
+}
+
+object PostHogPlaybackDiagnosticSink : PlaybackDiagnosticSink {
+    override fun capture(event: FormattedPlaybackDiagnostic) {
+        if (PostHogPrivacy.shouldDropEvent(event.eventName)) return
+        if (!PlaybackDiagnosticUploadPolicy.shouldUpload(event)) return
+        PostHog.capture(event.eventName, properties = PostHogPrivacy.sanitize(event.properties))
+    }
+}
+
+/**
+ * Routine success-path diagnostics with no analytic use stay in the debug log. GRAPH_SELECTED and
+ * RELEASE_BARRIER_STARTED keep uploading: per-engine fleet health (handoffs, failures, channel
+ * changes) is measured from them.
+ */
+object PlaybackDiagnosticUploadPolicy {
+    private val ROUTINE_CODES = setOf(
+        PlaybackDiagnosticCode.REQUEST_RESOLUTION_STARTED.name,
+        PlaybackDiagnosticCode.REQUEST_RESOLVED.name,
+        PlaybackDiagnosticCode.RELEASE_BARRIER_COMPLETED.name,
+        PlaybackDiagnosticCode.REQUIREMENTS_CHANGE_RESOLVED.name,
+    )
+
+    fun shouldUpload(event: FormattedPlaybackDiagnostic): Boolean =
+        event.properties["diagnostic_code"] !in ROUTINE_CODES
+}
+
+/** Receives one playback-quality summary per host session, at release. */
+fun interface PlaybackQualityReporter {
+    fun report(summary: PlaybackQualitySummary)
+}
+
+object PostHogPlaybackQualityReporter : PlaybackQualityReporter {
+    const val EVENT = "clean_playback_session"
+
+    override fun report(summary: PlaybackQualitySummary) {
+        if (PostHogPrivacy.shouldDropEvent(EVENT)) return
+        PostHog.capture(EVENT, properties = PostHogPrivacy.sanitize(summary.toProperties()))
+    }
+}

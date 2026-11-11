@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ms_resume_from_server_message">Vous avez avancé dans la lecture sur votre serveur. Reprendre à %1$s ?</string>
+    <string name="ms_resume_from_server_action">Reprendre</string>
+</resources>
