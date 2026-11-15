@@ -738,8 +738,96 @@ class CleanLivePlayerViewModelTest {
         fixture.viewModel.releaseBeforeExit()
     }
 
+    @Test
+    fun `recreated destination resolves saved identity without reusing consumed token`() = runTest {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val first = fixture(savedStateHandle = handle)
+        first.viewModel.initialize("initial", first.activity, first.lifecycle, first.owner)
+        val restoredHandle = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        first.viewModel.releaseBeforeExit()
+        val restored = fixture(
+            savedStateHandle = restoredHandle,
+            consumeResult = CleanLiveLaunchConsumeResult.Rejected(CleanLiveLaunchConsumeFailure.MISSING),
+        )
+        restored.viewModel.initialize("consumed", restored.activity, restored.lifecycle, restored.owner)
+        assertEquals(0, restored.consumer.calls)
+        assertTrue(restored.viewModel.routeState.value is CleanLivePlayerRouteState.Ready)
+        assertEquals(first.entry.selection.contentKey, restored.host.tunedSelection?.contentKey)
+        restored.viewModel.releaseBeforeExit()
+    }
+
+    @Test
+    fun `explicit exit removes saved resume and changed profile cannot restore it`() = runTest {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val first = fixture(savedStateHandle = handle)
+        first.viewModel.initialize("initial", first.activity, first.lifecycle, first.owner)
+        val copied = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        first.viewModel.releaseBeforeExit()
+        assertTrue(handle.keys().isEmpty())
+        val other = fixture(profileId = 2, savedStateHandle = copied,
+            consumeResult = CleanLiveLaunchConsumeResult.Rejected(CleanLiveLaunchConsumeFailure.MISSING))
+        other.viewModel.initialize("missing", other.activity, other.lifecycle, other.owner)
+        assertEquals(0, other.factory.calls)
+        other.viewModel.releaseBeforeExit()
+    }
+
+    @Test
+    fun `recreation resumes last accepted zap and unavailable channel never creates host`() = runTest {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val next = liveTarget(selection = liveSelection("next", "43"))
+        val first = fixture(savedStateHandle = handle, relative = { LiveRelativeResult.Target(next) })
+        first.viewModel.initialize("initial", first.activity, first.lifecycle, first.owner)
+        first.viewModel.requestZap(LiveZapDirection.NEXT)
+        advanceUntilIdle()
+        val copied = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        val unavailableCopy = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        first.viewModel.releaseBeforeExit()
+        val restored = fixture(savedStateHandle = copied,
+            restoreResult = com.nuvio.tv.playback.live.LiveInitialResult.Target(next))
+        restored.viewModel.initialize("consumed", restored.activity, restored.lifecycle, restored.owner)
+        assertEquals(next.selection, restored.host.tunedSelection)
+        assertEquals(0, restored.consumer.calls)
+        restored.viewModel.releaseBeforeExit()
+        val unavailable = fixture(savedStateHandle = unavailableCopy,
+            restoreResult = com.nuvio.tv.playback.live.LiveInitialResult.Rejected(
+                com.nuvio.tv.playback.live.LiveInitialFailure.UNAVAILABLE))
+        unavailable.viewModel.initialize("consumed", unavailable.activity, unavailable.lifecycle, unavailable.owner)
+        assertEquals(0, unavailable.factory.calls)
+        assertEquals(0, unavailable.consumer.calls)
+        unavailable.viewModel.releaseBeforeExit()
+    }
+
+    @Test
+    fun `exit during restore clears resume only after in flight tune completes`() = runTest {
+        val original = androidx.lifecycle.SavedStateHandle()
+        val first = fixture(savedStateHandle = original)
+        first.viewModel.initialize("initial", first.activity, first.lifecycle, first.owner)
+        val copied = androidx.lifecycle.SavedStateHandle(original.keys().associateWith { original.get<Any?>(it) })
+        first.viewModel.releaseBeforeExit()
+        val started = CompletableDeferred<Unit>()
+        val allowRestore = CompletableDeferred<Unit>()
+        val restoring = fixture(savedStateHandle = copied, restoreBeforeResult = {
+            started.complete(Unit)
+            allowRestore.await()
+        })
+        val initialize = async {
+            restoring.viewModel.initialize("consumed", restoring.activity, restoring.lifecycle, restoring.owner)
+        }
+        started.await()
+        val exit = async { restoring.viewModel.releaseBeforeExit() }
+        runCurrent()
+        allowRestore.complete(Unit)
+        initialize.await()
+        exit.await()
+        assertTrue(copied.keys().isEmpty())
+        assertEquals(1, restoring.host.releaseCalls)
+    }
+
     private fun fixture(
         profileId: Int = 1,
+        savedStateHandle: androidx.lifecycle.SavedStateHandle = androidx.lifecycle.SavedStateHandle(),
+        restoreResult: com.nuvio.tv.playback.live.LiveInitialResult? = null,
+        restoreBeforeResult: suspend () -> Unit = {},
         consumeResult: CleanLiveLaunchConsumeResult? = null,
         profileSource: CleanLiveDestinationProfileSource? = null,
         factoryCreated: (Int) -> Unit = {},
@@ -806,6 +894,11 @@ class CleanLivePlayerViewModelTest {
             ownerDispatcher = Dispatchers.Unconfined,
             releaseRetryWait = releaseRetryWait,
             zapSettleWait = zapSettleWait,
+            savedStateHandle = savedStateHandle,
+            liveSelection = com.nuvio.tv.playback.live.LiveChannelSelectionPort {
+                restoreBeforeResult()
+                restoreResult ?: com.nuvio.tv.playback.live.LiveInitialResult.Target(entry.target)
+            },
         )
         return Fixture(
             viewModel = viewModel,

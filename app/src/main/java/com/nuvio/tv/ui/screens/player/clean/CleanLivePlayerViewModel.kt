@@ -9,6 +9,13 @@ import android.content.Context
 import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.SavedStateHandle
+import com.nuvio.tv.ui.navigation.LiveSessionSavedState
+import com.nuvio.tv.playback.core.ProviderSelectionId
+import com.nuvio.tv.playback.live.LiveChannelSelectionPort
+import com.nuvio.tv.playback.live.LiveInitialRequest
+import com.nuvio.tv.playback.live.LiveInitialResult
+import com.nuvio.tv.playback.live.LiveInitialFailure
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.playback.core.PlaybackSnapshot
 import com.nuvio.tv.playback.core.PlaybackTrackId
@@ -121,6 +128,8 @@ internal class CleanLivePlayerViewModel private constructor(
     private val releaseRetryWait: CleanLiveReleaseRetryWait,
     private val zapSettleWait: CleanLiveZapSettleWait,
     picturePort: LivePicturePort,
+    private val savedSession: LiveSessionSavedState,
+    private val liveSelection: LiveChannelSelectionPort,
 ) : ViewModel() {
     @Inject
     internal constructor(
@@ -131,6 +140,8 @@ internal class CleanLivePlayerViewModel private constructor(
         liveNavigation: LiveChannelNavigationPort,
         playedHistory: LivePlayedHistoryPort,
         livePicture: LivePicturePreferences,
+        savedStateHandle: SavedStateHandle,
+        liveSelection: LiveChannelSelectionPort,
     ) : this(
         appContext = context.applicationContext,
         launchConsumer = CleanLiveDestinationLaunchConsumer(launchStore::consume),
@@ -142,6 +153,8 @@ internal class CleanLivePlayerViewModel private constructor(
         releaseRetryWait = CleanLiveReleaseRetryWait { delay(it) },
         zapSettleWait = CleanLiveZapSettleWait { delay(LiveZapSettlePolicy.SETTLE_MS) },
         picturePort = livePicture,
+        savedSession = LiveSessionSavedState(savedStateHandle),
+        liveSelection = liveSelection,
     )
 
     internal constructor(
@@ -157,6 +170,10 @@ internal class CleanLivePlayerViewModel private constructor(
         releaseRetryWait: CleanLiveReleaseRetryWait = CleanLiveReleaseRetryWait {},
         zapSettleWait: CleanLiveZapSettleWait = CleanLiveZapSettleWait {},
         picturePort: LivePicturePort = LivePicturePort.Unremembered,
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
+        liveSelection: LiveChannelSelectionPort = LiveChannelSelectionPort {
+            LiveInitialResult.Rejected(LiveInitialFailure.UNAVAILABLE)
+        },
         @Suppress("UNUSED_PARAMETER") testOnly: Unit = Unit,
     ) : this(
         appContext = context.applicationContext,
@@ -169,6 +186,8 @@ internal class CleanLivePlayerViewModel private constructor(
         releaseRetryWait = releaseRetryWait,
         zapSettleWait = zapSettleWait,
         picturePort = picturePort,
+        savedSession = LiveSessionSavedState(savedStateHandle),
+        liveSelection = liveSelection,
     )
 
     private val ownerJob = SupervisorJob()
@@ -258,7 +277,8 @@ internal class CleanLivePlayerViewModel private constructor(
 
         val capturedProfileId = profileSource.activeProfileId()
         val launch = when (
-            val consumed = launchConsumer.consume(routeToken, capturedProfileId)
+            val consumed = restoreLaunch(capturedProfileId)
+                ?: launchConsumer.consume(routeToken, capturedProfileId)
         ) {
             is CleanLiveLaunchConsumeResult.Ready -> consumed.entry
             is CleanLiveLaunchConsumeResult.Rejected -> {
@@ -271,6 +291,31 @@ internal class CleanLivePlayerViewModel private constructor(
         activeLaunch = launch
         activeMetadata = metadata
         createAndTune(launch, metadata, activity, lifecycle, surfaceOwner)
+    }
+
+    private suspend fun restoreLaunch(profileId: Int): CleanLiveLaunchConsumeResult? {
+        val saved = savedSession.read(profileId) ?: return null
+        val selected = try {
+            liveSelection.select(LiveInitialRequest(
+                ProviderSelectionId(saved.contentId), PlaybackProfileId(profileId.toString()),
+            ))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        val target = (selected as? LiveInitialResult.Target)?.target
+        if (profileSource.activeProfileId() != profileId) {
+            return CleanLiveLaunchConsumeResult.Rejected(CleanLiveLaunchConsumeFailure.PROFILE_MISMATCH)
+        }
+        if (target == null || target.selection.accountId.value != saved.accountId ||
+            target.contentId.value != saved.contentId ||
+            target.mediaFingerprint != LiveMediaFingerprint.create(target.selection, PlaybackProfileId(profileId.toString()))) {
+            return CleanLiveLaunchConsumeResult.Rejected(CleanLiveLaunchConsumeFailure.MISSING)
+        }
+        return CleanLiveLaunchConsumeResult.Ready(CleanLiveLaunchEntry(
+            target, profileId, CleanLiveLaunchMetadata.sanitized(target.title), saved.origin,
+        ))
     }
 
     private suspend fun createAndTune(
@@ -327,6 +372,7 @@ internal class CleanLivePlayerViewModel private constructor(
             boundProfileId = launch.playbackProfileId(),
             generation = acceptedGeneration,
         )
+        savedSession.save(launch.target, launch.activeProfileId, launch.origin)
         followPicture(launch.target.contentId.value)
         publishReady(created, launch.metadata, launch.origin)
     }
@@ -455,6 +501,7 @@ internal class CleanLivePlayerViewModel private constructor(
                 return@withLock
             }
 
+            savedSession.save(nextLaunch.target, nextLaunch.activeProfileId, nextLaunch.origin)
             activeLaunch = nextLaunch
             activeMetadata = nextMediaMetadata
             followPicture(target.contentId.value)
@@ -470,6 +517,7 @@ internal class CleanLivePlayerViewModel private constructor(
     /** Returns only after the host's affirmative provider/engine release barrier completes. */
     suspend fun releaseBeforeExit() = withContext(NonCancellable) {
         ownershipMutex.withLock {
+            savedSession.clear()
             if (releaseCompleted) return@withLock
             val current = host
             if (current != null) {

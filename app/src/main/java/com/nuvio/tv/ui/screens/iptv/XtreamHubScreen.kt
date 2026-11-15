@@ -39,6 +39,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -112,7 +113,7 @@ fun XtreamHubScreen(
     var showAccountPicker by remember { mutableStateOf(false) }
     // B10: the Live guide's preview player expanded to fullscreen — hide the header row so the
     // video really covers the whole screen. Focus is locked inside the guide while true.
-    var liveFullscreen by remember { mutableStateOf(false) }
+    var liveFullscreen by rememberSaveable { mutableStateOf(false) }
     // ...and tell the rest of the app the player owns the screen, so chrome that lives OUTSIDE this
     // composable stands down too. The sidebar is drawn by MainActivity from the route alone, so
     // without this the nav rail stays on top of a fullscreen live channel (it became visible the

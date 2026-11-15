@@ -26,7 +26,8 @@ class CleanLiveGuideCutoverArchitectureTest {
         assertTrue(screen.contains("viewModel.moveChannelFocus(LiveZapDirection."))
         assertTrue(screen.contains("playbackViewModel.requestPromote()"))
         assertTrue(screen.contains("playbackViewModel.requestCollapse()"))
-        assertTrue(screen.contains("playbackViewModel.detachGuide()"))
+        assertTrue(screen.contains("playbackViewModel.detachGuide(clearResume = activity?.isChangingConfigurations != true)"))
+        assertTrue(screen.contains("playbackViewModel.restoreGuide("))
     }
 
     @Test
@@ -105,7 +106,7 @@ class CleanLiveGuideCutoverArchitectureTest {
 
     @Test
     fun `guide owner has a nonterminal detach barrier and terminal clear release`() {
-        assertTrue(owner.contains("fun detachGuide()"))
+        assertTrue(owner.contains("fun detachGuide(clearResume: Boolean = true)"))
         assertTrue(owner.contains("current.release()"))
         assertTrue(owner.contains("mutableState.value = CleanLiveGuidePlaybackState.Detached"))
         assertTrue(owner.contains("suspend fun releaseBeforeExit()"))

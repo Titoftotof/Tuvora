@@ -28,8 +28,8 @@ import kotlinx.coroutines.withContext
  * Navigation/Compose owner for the isolated clean fullscreen destination.
  *
  * Navigation is allowed to pop only after [CleanLivePlayerViewModel.releaseBeforeExit] confirms the
- * provider, engine, surface, MediaSession, lifecycle, and output release barrier. Process-restored
- * or already-consumed tokens fail closed and leave no transport material in the back stack.
+ * provider, engine, surface, MediaSession, lifecycle, and output release barrier. A recreated owner
+ * may resolve its saved channel identity; missing tokens without that saved session fail closed.
  */
 @Composable
 internal fun CleanLivePlayerRoute(
@@ -66,6 +66,12 @@ internal fun CleanLivePlayerRoute(
     val rejectionReason = (routeState as? CleanLivePlayerRouteState.Rejected)?.reason
     LaunchedEffect(rejectionReason) {
         if (rejectionReason != null && rejectionReason != CleanLivePlayerRejection.RELEASE_FAILED) {
+            val message = if (rejectionReason == CleanLivePlayerRejection.PROFILE_MISMATCH) {
+                com.nuvio.tv.R.string.clean_live_ingress_profile_changed
+            } else {
+                com.nuvio.tv.R.string.clean_live_ingress_unavailable
+            }
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
             requestReleaseAndExit()
         }
     }

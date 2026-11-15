@@ -10,6 +10,8 @@ import android.util.Log
 import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.SavedStateHandle
+import com.nuvio.tv.ui.navigation.LiveSessionSavedState
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.playback.core.PlaybackProfileId
 import com.nuvio.tv.playback.core.PlaybackSnapshot
@@ -114,6 +116,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
     ownerDispatcher: CoroutineDispatcher,
     private val releaseRetryWait: CleanLiveGuideReleaseRetryWait,
     picturePort: LivePicturePort,
+    private val savedSession: LiveSessionSavedState,
 ) : ViewModel() {
     @Inject
     internal constructor(
@@ -124,6 +127,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         liveNavigation: LiveChannelNavigationPort,
         playedHistory: LivePlayedHistoryPort,
         livePicture: LivePicturePreferences,
+        savedStateHandle: SavedStateHandle,
     ) : this(
         appContext = context.applicationContext,
         profileSource = CleanLiveGuideProfileSource { profileManager.activeProfileId.value },
@@ -134,6 +138,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         ownerDispatcher = Dispatchers.Main.immediate,
         releaseRetryWait = CleanLiveGuideReleaseRetryWait { delay(it) },
         picturePort = livePicture,
+        savedSession = LiveSessionSavedState(savedStateHandle),
     )
 
     internal constructor(
@@ -146,6 +151,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         ownerDispatcher: CoroutineDispatcher,
         releaseRetryWait: CleanLiveGuideReleaseRetryWait = CleanLiveGuideReleaseRetryWait {},
         picturePort: LivePicturePort = LivePicturePort.Unremembered,
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
         @Suppress("UNUSED_PARAMETER") testOnly: Unit = Unit,
     ) : this(
         appContext = context.applicationContext,
@@ -157,6 +163,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         ownerDispatcher = ownerDispatcher,
         releaseRetryWait = releaseRetryWait,
         picturePort = picturePort,
+        savedSession = LiveSessionSavedState(savedStateHandle),
     )
 
     private val ownerJob = SupervisorJob()
@@ -218,6 +225,19 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
 
     private val zapWorker = ownerScope.launch {
         for (direction in zapRequests) performZap(direction)
+    }
+
+    /** Reattach only a previously accepted tune for this profile and playlist. */
+    fun restoreGuide(
+        accountId: String,
+        activity: Activity,
+        lifecycle: Lifecycle,
+        surfaceOwner: FrameLayout,
+        previewViewport: VideoDimensions?,
+    ): Boolean {
+        val saved = savedSession.read(profileSource.activeProfileId(), accountId) ?: return false
+        attachGuide(ProviderSelectionId(saved.contentId), activity, lifecycle, surfaceOwner, previewViewport)
+        return true
     }
 
     /** Compose-safe entry point; accepted work belongs to the ViewModel scope. */
@@ -368,6 +388,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
     }
 
     internal suspend fun invalidateProviderOwnership() = ownershipMutex.withLock {
+        savedSession.clear()
         if (releaseCompleted) return@withLock
         attachGeneration += 1
         pendingTuneContentId = null
@@ -701,6 +722,9 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
     }
 
     private fun publishReady(current: CleanLiveHost) {
+        val profileId = boundProfileId?.value?.toIntOrNull()
+        val target = activeTarget
+        if (profileId != null && target != null) savedSession.save(target, profileId)
         publishSnapshot(current.snapshot.value)
         presentationJob = ownerScope.launch {
             current.snapshot.collect(::publishSnapshot)
@@ -788,14 +812,15 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
      * Nonterminal guide disposal. The old host's affirmative barrier completes before a later
      * attach can recreate it; target/profile identity remains available for that reattachment.
      */
-    fun detachGuide() {
+    fun detachGuide(clearResume: Boolean = true) {
         if (!releaseCompleted && !clearedReleaseLoopStarted) {
-            launchContained(CleanLiveGuideFailure.RELEASE_FAILED) { detach() }
+            launchContained(CleanLiveGuideFailure.RELEASE_FAILED) { detach(clearResume) }
         }
     }
 
-    internal suspend fun detach() = withContext(NonCancellable) {
+    internal suspend fun detach(clearResume: Boolean = true) = withContext(NonCancellable) {
         ownershipMutex.withLock {
+            if (clearResume) savedSession.clear()
             if (releaseCompleted) return@withLock
             attachGeneration += 1
             pendingTuneContentId = null
@@ -828,6 +853,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
     /** Returns only after the host's provider/engine release barrier has completed. */
     suspend fun releaseBeforeExit() = withContext(NonCancellable) {
         ownershipMutex.withLock {
+            savedSession.clear()
             if (releaseCompleted) return@withLock
             attachGeneration += 1
             pendingTuneContentId = null

@@ -630,8 +630,44 @@ class CleanLiveGuidePlaybackViewModelTest {
         assertEquals(CleanLiveGuidePlaybackState.Released, fixture.viewModel.state.value)
     }
 
+    @Test
+    fun `saved guide resumes accepted channel once after recreation`() = runTest {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val first = fixture(savedStateHandle = handle)
+        first.viewModel.attach(first.initial.contentId, first.activity, first.lifecycle, first.owner)
+        val copied = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        first.viewModel.releaseBeforeExit()
+        val restored = fixture(savedStateHandle = copied)
+        repeat(2) {
+            restored.viewModel.restoreGuide(restored.initial.selection.accountId.value,
+                restored.activity, restored.lifecycle, restored.owner, null)
+        }
+        advanceUntilIdle()
+        assertEquals(1, restored.factory.calls)
+        assertEquals(restored.initial.selection, restored.firstHost.tuneTargets.single())
+        restored.viewModel.releaseBeforeExit()
+    }
+
+    @Test
+    fun `another playlist cannot resume saved guide and explicit detach clears it`() = runTest {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val first = fixture(savedStateHandle = handle)
+        first.viewModel.attach(first.initial.contentId, first.activity, first.lifecycle, first.owner)
+        val copied = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        first.viewModel.detachGuide()
+        advanceUntilIdle()
+        assertTrue(handle.keys().isEmpty())
+        first.viewModel.releaseBeforeExit()
+        val other = fixture(savedStateHandle = copied)
+        other.viewModel.restoreGuide("different-playlist", other.activity, other.lifecycle, other.owner, null)
+        advanceUntilIdle()
+        assertEquals(0, other.factory.calls)
+        other.viewModel.releaseBeforeExit()
+    }
+
     private fun fixture(
         profileSource: () -> Int = { 1 },
+        savedStateHandle: androidx.lifecycle.SavedStateHandle = androidx.lifecycle.SavedStateHandle(),
         relative: (suspend (LiveRelativeRequest, Int) -> LiveRelativeResult)? = null,
         factoryCreated: (Int) -> Unit = {},
         selectionBeforeResult: suspend (LiveInitialRequest) -> Unit = {},
@@ -681,6 +717,7 @@ class CleanLiveGuidePlaybackViewModelTest {
             ownerDispatcher = ownerDispatcher,
             releaseRetryWait = releaseWait,
             picturePort = picturePort,
+            savedStateHandle = savedStateHandle,
         )
         return Fixture(
             viewModel = viewModel,

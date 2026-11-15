@@ -356,8 +356,19 @@ fun LiveGuide(
             GuidePlaybackInteractionPolicy.Click.RETRY -> playbackViewModel.requestRetry()
         }
     }
-    DisposableEffect(playbackViewModel) {
-        onDispose { playbackViewModel.detachGuide() }
+    LaunchedEffect(playbackViewModel, account.id, activity, surfaceOwner) {
+        val hostActivity = activity ?: return@LaunchedEffect
+        val resuming = playbackViewModel.restoreGuide(
+            account.id, hostActivity, lifecycleOwner.lifecycle, surfaceOwner, previewViewport,
+        )
+        // Navigation away clears playback intent; a saved fullscreen flag alone must not open
+        // an empty player when returning to the guide.
+        if (!resuming) onFullscreenChange(false)
+    }
+    DisposableEffect(playbackViewModel, activity) {
+        onDispose {
+            playbackViewModel.detachGuide(clearResume = activity?.isChangingConfigurations != true)
+        }
     }
 
     LaunchedEffect(fullscreen) {
