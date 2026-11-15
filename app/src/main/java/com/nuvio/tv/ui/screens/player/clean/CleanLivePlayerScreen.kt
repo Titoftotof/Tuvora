@@ -55,6 +55,7 @@ import com.nuvio.tv.playback.ui.LivePlaybackUiStatusCode
 import com.nuvio.tv.ui.components.player.PlayerControlsTiming
 import com.nuvio.tv.ui.screens.player.clean.live.LiveControlsOverlay
 import com.nuvio.tv.ui.screens.player.clean.live.LiveControlsPolicy
+import com.nuvio.tv.ui.screens.player.clean.live.LiveOkPressGate
 import com.nuvio.tv.ui.screens.player.clean.live.LiveOverlayActions
 import com.nuvio.tv.ui.screens.player.clean.live.LiveOverlayInfo
 import com.nuvio.tv.ui.screens.player.clean.live.LivePanel
@@ -100,6 +101,7 @@ internal fun CleanLivePlayerScreen(
     val latestSurfaceOwnerReady by rememberUpdatedState(onSurfaceOwnerReady)
 
     // Starts shown so the viewer sees what's playing, then hides on the shared delay.
+    val okPressGate = remember { LiveOkPressGate() }
     var controlsVisible by remember { mutableStateOf(true) }
     var revealTick by remember { mutableIntStateOf(0) }
     // The controls on screen came from a zap and nothing else has touched them since.
@@ -162,7 +164,7 @@ internal fun CleanLivePlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                val action = LiveControlsPolicy.keyAction(
+                val proposed = LiveControlsPolicy.keyAction(
                     key = event.key,
                     isKeyDown = event.type == KeyEventType.KeyDown,
                     controlsVisible = controlsVisible,
@@ -171,7 +173,7 @@ internal fun CleanLivePlayerScreen(
                     isRepeat = event.nativeKeyEvent.repeatCount > 0,
                     zapReveal = zapReveal,
                 )
-                when (action) {
+                when (okPressGate.keyAction(event, fullscreen = true, proposed = proposed)) {
                     LiveControlsPolicy.KeyAction.PASS -> return@onPreviewKeyEvent false
                     LiveControlsPolicy.KeyAction.PASS_AND_KEEP_ALIVE -> {
                         if (event.type == KeyEventType.KeyDown) { revealTick++; zapReveal = false }

@@ -18,6 +18,7 @@ import com.nuvio.tv.playback.ui.LivePlaybackUiStatusCode
 import com.nuvio.tv.ui.components.player.PlayerControlsTiming
 import com.nuvio.tv.ui.screens.player.clean.live.LiveControlsOverlay
 import com.nuvio.tv.ui.screens.player.clean.live.LiveControlsPolicy
+import com.nuvio.tv.ui.screens.player.clean.live.LiveOkPressGate
 import com.nuvio.tv.ui.screens.player.clean.live.LiveOverlayActions
 import com.nuvio.tv.ui.screens.player.clean.live.LiveOverlayInfo
 import com.nuvio.tv.ui.screens.player.clean.live.LivePanel
@@ -375,6 +376,7 @@ fun LiveGuide(
         if (fullscreen) playbackViewModel.requestPromote() else playbackViewModel.requestCollapse()
     }
 
+    val okPressGate = remember { LiveOkPressGate() }
     var controlsVisible by remember { mutableStateOf(false) }
     var controlsTick by remember { mutableStateOf(0) }
     // F08: the channel list over fullscreen video, and the previous channel for the LAST key.
@@ -472,21 +474,19 @@ fun LiveGuide(
             // arrive there — intercept them in the preview phase before the row's clickable.
             // BACK is NOT consumed (BackHandler collapses). UP/DOWN zap channels.
             .onPreviewKeyEvent { event ->
-                if (!fullscreen) return@onPreviewKeyEvent false
-                // F28: the remote map lives in LiveControlsPolicy (shared with the clean live player).
-                // An open panel (the channel list, a picker, a hide notice's Undo) keeps its own keys.
-                when (
-                    LiveControlsPolicy.keyAction(
-                        key = event.key,
-                        isKeyDown = event.type == KeyEventType.KeyDown,
-                        controlsVisible = controlsVisible,
-                        paused = playbackUi?.isPaused == true,
-                        panelOpen = livePanelOpen,
-                        isRepeat = event.nativeKeyEvent.repeatCount > 0,
-                        hasLineup = true,
-                        zapReveal = zapReveal,
-                    )
-                ) {
+                // Observe the guide's press before promotion too: its remaining events must not
+                // become a click on the fullscreen controls after focus moves.
+                val proposed = if (fullscreen) LiveControlsPolicy.keyAction(
+                    key = event.key,
+                    isKeyDown = event.type == KeyEventType.KeyDown,
+                    controlsVisible = controlsVisible,
+                    paused = playbackUi?.isPaused == true,
+                    panelOpen = livePanelOpen,
+                    isRepeat = event.nativeKeyEvent.repeatCount > 0,
+                    hasLineup = true,
+                    zapReveal = zapReveal,
+                ) else LiveControlsPolicy.KeyAction.PASS
+                when (okPressGate.keyAction(event, fullscreen, proposed)) {
                     LiveControlsPolicy.KeyAction.PASS -> return@onPreviewKeyEvent false
                     // The buttons own the D-pad while shown; each press keeps them up.
                     LiveControlsPolicy.KeyAction.PASS_AND_KEEP_ALIVE -> {
