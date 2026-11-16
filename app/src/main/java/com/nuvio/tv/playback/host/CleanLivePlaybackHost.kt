@@ -53,6 +53,7 @@ internal fun interface CleanMediaSessionOwnerFactory {
         parentScope: CoroutineScope,
         controller: PlaybackSessionController,
         metadata: CleanMediaSessionMetadata,
+        displayModeTransition: () -> Boolean,
     ): CleanMediaSessionOwner
 }
 
@@ -244,6 +245,7 @@ internal class CleanLivePlaybackHost private constructor(
                 parentScope,
                 controller,
                 metadata,
+                displayModeTransition,
             ->
             CleanMediaSessionOwner.create(
                 context = context,
@@ -251,6 +253,7 @@ internal class CleanLivePlaybackHost private constructor(
                 parentScope = parentScope,
                 controller = controller,
                 metadata = metadata,
+                displayModeTransition = displayModeTransition,
             )
         }
 
@@ -322,6 +325,10 @@ internal class CleanLivePlaybackHost private constructor(
                         parentScope = hostScope,
                         controller = controller,
                         metadata = neutralMetadata,
+                        displayModeTransition = {
+                            (outputController as? com.nuvio.tv.playback.android.output.AndroidPlaybackOutputController)
+                                ?.isDisplayModeTransitionActive() == true
+                        },
                     )
                 }
             } catch (cancelled: CancellationException) {

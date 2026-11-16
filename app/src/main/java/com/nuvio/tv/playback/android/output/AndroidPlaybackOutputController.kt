@@ -65,8 +65,12 @@ class AndroidPlaybackOutputController internal constructor(
     private val host: AndroidDisplayModeHost,
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val verification: DisplayModeVerificationPolicy = DisplayModeVerificationPolicy(),
+    private val transitionWindow: DisplayModeTransitionWindow = DisplayModeTransitionWindow(),
 ) : PlaybackOutputController {
     constructor(activity: Activity) : this(ActivityDisplayModeHost(activity))
+
+    /** Only actual Window mode requests arm this bounded HDMI transition window. */
+    internal fun isDisplayModeTransitionActive(): Boolean = transitionWindow.isActive()
 
     private val mutex = Mutex()
     private var latestGeneration: Long? = null
@@ -269,12 +273,14 @@ class AndroidPlaybackOutputController internal constructor(
             return true
         }
         return try {
+            transitionWindow.begin()
             host.requestMode(modeId)
             lastRequestedModeId = modeId
             lastRequestedGeneration = generation
             lastRequestedFactsRevision = factsRevision
             true
         } catch (_: Exception) {
+            transitionWindow.cancel()
             false
         }
     }

@@ -415,7 +415,7 @@ class CleanLivePlaybackHostTest {
             applicationLooper = Looper.getMainLooper(),
             applicationDispatcher = Dispatchers.Unconfined,
             qualityReporter = com.nuvio.tv.playback.wiring.PlaybackQualityReporter { qualityReports += it },
-            mediaSessionFactory = CleanMediaSessionOwnerFactory { _, _, _, _, _ ->
+            mediaSessionFactory = CleanMediaSessionOwnerFactory { _, _, _, _, _, _ ->
                 if (mediaSessionCreationFails) error("synthetic creation failure")
                 mediaOwner
             },

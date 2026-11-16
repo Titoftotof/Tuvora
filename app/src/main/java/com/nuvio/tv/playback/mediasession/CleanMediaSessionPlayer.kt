@@ -54,10 +54,15 @@ internal class CleanMediaSessionPlayer(
 
     override fun getState(): State = stateFor(latestSnapshot, latestMetadata)
 
-    override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> =
-        dispatch {
+    /** Evaluated synchronously while Media3 still exposes the controller for this request. */
+    internal var ignoreSystemPause: () -> Boolean = { false }
+
+    override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+        if (!playWhenReady && ignoreSystemPause()) return completedFuture()
+        return dispatch {
             if (playWhenReady) controller.resume() else controller.pause()
         }
+    }
 
     override fun handleStop(): ListenableFuture<*> = dispatch(controller::stop)
 

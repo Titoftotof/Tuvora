@@ -26,6 +26,35 @@ import org.junit.Test
 
 class AndroidPlaybackOutputControllerTest {
     @Test
+    fun `only a real requested mode switch arms the bounded HDMI window`() = runTest {
+        var now = 0L
+        val window = DisplayModeTransitionWindow { now }
+        val host = FakeHost()
+        val controller = AndroidPlaybackOutputController(
+            host, StandardTestDispatcher(testScheduler),
+            DisplayModeVerificationPolicy(pollIntervalMs = 0), window,
+        )
+        assertEquals(false, controller.isDisplayModeTransitionActive())
+        controller.apply(request(1, enabled = false))
+        assertEquals(false, controller.isDisplayModeTransitionActive())
+        assertEquals(PlaybackOutputStatus.APPLIED, controller.apply(request(2)).status())
+        assertEquals(true, controller.isDisplayModeTransitionActive())
+        now = 2_000
+        controller.apply(request(2))
+        now = 3_000
+        assertEquals(false, controller.isDisplayModeTransitionActive())
+    }
+
+    @Test
+    fun `failed Window request does not suppress system pauses`() = runTest {
+        val controller = AndroidPlaybackOutputController(
+            FakeHost(failRequests = true), StandardTestDispatcher(testScheduler),
+        )
+        assertEquals(PlaybackOutputStatus.APPLY_FAILED, controller.apply(request(1)).status())
+        assertEquals(false, controller.isDisplayModeTransitionActive())
+    }
+
+    @Test
     fun `apply reports policy and factual waiting states without touching Window`() = runTest {
         val host = FakeHost()
         val controller = controller(host)

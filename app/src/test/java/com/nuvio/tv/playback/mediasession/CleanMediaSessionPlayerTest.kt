@@ -141,6 +141,54 @@ class CleanMediaSessionPlayerTest {
         assertNull(player.currentMediaItem?.localConfiguration)
     }
 
+    @Test
+    fun `HDMI workaround only ignores Android pauses on Fire TV during live fullscreen switches`() {
+        val live = PlaybackSnapshot(
+            requestSummary = liveSummary(),
+            playWhenReady = true,
+            profile = com.nuvio.tv.playback.core.SessionProfile.FULLSCREEN,
+        )
+        fun ignores(
+            manufacturer: String = "Amazon",
+            caller: String? = "android",
+            uid: Int? = 1000,
+            switching: Boolean = true,
+            snapshot: PlaybackSnapshot = live,
+        ) = FireTvHdmiPausePolicy.shouldIgnore(manufacturer, caller, uid, switching, snapshot)
+
+        assertTrue(ignores())
+        assertFalse(ignores(switching = false))
+        assertFalse(ignores(manufacturer = "Google"))
+        assertFalse(ignores(caller = "com.amazon.vizzini"))
+        assertFalse(ignores(caller = null, uid = null))
+        assertFalse(ignores(uid = 1234))
+        assertFalse(ignores(snapshot = live.copy(playWhenReady = false)))
+        assertFalse(ignores(snapshot = live.copy(profile = com.nuvio.tv.playback.core.SessionProfile.GUIDE)))
+        assertFalse(ignores(snapshot = live.copy(requestSummary = liveSummary().copy(contentType = ContentType.VOD))))
+        assertFalse(ignores(snapshot = live.copy(requestSummary = liveSummary().copy(contentType = ContentType.CATCH_UP))))
+    }
+
+    @Test
+    fun `ignored HDMI pause preserves intent and subsequent real pause and play still work`() {
+        snapshots.value = PlaybackSnapshot(
+            state = PlaybackState.PLAYING,
+            requestSummary = liveSummary(),
+            playWhenReady = true,
+            isPlaying = true,
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        var switching = true
+        player.ignoreSystemPause = { switching }
+        player.pause()
+        assertTrue(commands.isEmpty())
+        assertTrue(player.playWhenReady)
+
+        switching = false
+        player.pause()
+        player.play()
+        assertEquals(listOf(PlaybackCommand.Pause, PlaybackCommand.Resume), commands)
+    }
+
     private fun liveSummary() = RequestSummary(
         scheme = "https",
         contentType = ContentType.LIVE,

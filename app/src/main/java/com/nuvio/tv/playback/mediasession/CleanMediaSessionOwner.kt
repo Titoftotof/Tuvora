@@ -87,6 +87,7 @@ class CleanMediaSessionOwner private constructor(
             parentScope: CoroutineScope,
             controller: PlaybackSessionController,
             metadata: CleanMediaSessionMetadata,
+            displayModeTransition: () -> Boolean = { false },
         ): CleanMediaSessionOwner {
             check(Looper.myLooper() == applicationLooper) {
                 "Create the clean MediaSession on its application looper"
@@ -104,6 +105,16 @@ class CleanMediaSessionOwner private constructor(
             } catch (error: Exception) {
                 player.release()
                 throw error
+            }
+            player.ignoreSystemPause = {
+                val caller = mediaSession.controllerForCurrentRequest
+                FireTvHdmiPausePolicy.shouldIgnore(
+                    manufacturer = android.os.Build.MANUFACTURER,
+                    callerPackage = caller?.packageName,
+                    callerUid = caller?.uid,
+                    displayModeTransition = displayModeTransition(),
+                    snapshot = controller.snapshot.value,
+                )
             }
             return CleanMediaSessionOwner(
                 applicationLooper = applicationLooper,
