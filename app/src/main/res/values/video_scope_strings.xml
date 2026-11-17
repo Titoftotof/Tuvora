@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="video_scope_live_title">Live TV</string>
+    <string name="video_scope_live_note">Live TV keeps the current HDMI mode to avoid display interruptions. Compatible player and decoder changes apply the next time you open the live player.</string>
+    <string name="video_scope_movies_title">Movies and series</string>
+    <string name="video_resolution_requires_frame_rate">Enable frame rate matching above to use resolution matching.</string>
+    <string name="video_scope_dolby_note">For compatible movies and series played with ExoPlayer. These options do not change the Fire TV or television HDR output setting.</string>
+    <string name="video_scope_mpv_note">Detailed modes apply to movies and series with MPV. Live TV uses the compatible decoder and output choices at its next opening.</string>
+</resources>

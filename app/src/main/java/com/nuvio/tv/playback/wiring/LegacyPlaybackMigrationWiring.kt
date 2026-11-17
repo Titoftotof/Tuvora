@@ -100,6 +100,7 @@ object LegacyPlayerSettingsSnapshotMapper {
     private val RAW_KEY_TO_GATED_FIELD = mapOf(
         "internal_player_engine" to "internalPlayerEngine",
         "auto_switch_internal_player_on_error" to "autoSwitchInternalPlayerOnError",
+        "mpv_hardware_decode_mode" to "mpvHardwareDecodeMode",
     )
 
     fun map(

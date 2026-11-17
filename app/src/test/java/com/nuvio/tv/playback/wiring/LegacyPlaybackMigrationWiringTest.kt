@@ -133,7 +133,7 @@ class LegacyPlaybackMigrationWiringTest {
     }
 
     @Test
-    fun `production bootstrap is profile scoped lazy and propagates the exact imported preference`() = runTest {
+    fun `production bootstrap refreshes each session without importing the profile twice`() = runTest {
         val store = InMemoryStore()
         val repository = PlaybackPreferenceRepository(store)
         val requestedProfiles = mutableListOf<String>()
@@ -152,7 +152,8 @@ class LegacyPlaybackMigrationWiringTest {
         val profileTwoAgain = bootstrap.load("2")
         val profileThree = bootstrap.load("3")
 
-        assertEquals(listOf("2", "3"), requestedProfiles)
+        assertEquals(listOf("2", "2", "3"), requestedProfiles)
+        assertEquals(2, store.writeCount)
         assertTrue(profileTwo.importedLegacy)
         assertFalse(profileTwoAgain.importedLegacy)
         assertTrue(profileThree.importedLegacy)
@@ -161,6 +162,63 @@ class LegacyPlaybackMigrationWiringTest {
             PlaybackCommand.PreferencesChanged(profileTwo.preferences.playback),
             profileTwo.initialCommand(),
         )
+    }
+
+    @Test
+    fun `video edits reach a new session without overwriting unrelated preferences or the stored document`() = runTest {
+        val store = InMemoryStore()
+        val repository = PlaybackPreferenceRepository(store)
+        var current = PlayerSettings(
+            internalPlayerEngine = InternalPlayerEngine.EXOPLAYER,
+            skipSilence = true,
+        )
+        val bootstrap = ProductionPlaybackPreferenceBootstrap(repository) { profileId ->
+            assertEquals("2", profileId)
+            LegacyPlayerSettingsSnapshotMapper.map(current, "player-settings-v1")
+        }
+        val first = bootstrap.load("2")
+        current = current.copy(
+            internalPlayerEngine = InternalPlayerEngine.MVP_PLAYER,
+            autoSwitchInternalPlayerOnError = true,
+            mpvHardwareDecodeMode = com.nuvio.tv.data.local.MpvHardwareDecodeMode.DISABLED,
+            frameRateMatchingMode = com.nuvio.tv.data.local.FrameRateMatchingMode.START_STOP,
+            resolutionMatchingEnabled = true,
+            skipSilence = false,
+            dv7HandlingMode = com.nuvio.tv.data.local.Dv7HandlingMode.DV81_LIBDOVI,
+        )
+        val next = bootstrap.load("2")
+
+        assertFalse(next.importedLegacy)
+        assertEquals(EnginePreference.LIBMPV, next.preferences.playback.engine)
+        assertTrue(next.preferences.playback.automaticFallback)
+        assertEquals(com.nuvio.tv.playback.core.DecoderPreference.SOFTWARE_ONLY, next.preferences.playback.decoder)
+        assertEquals(com.nuvio.tv.playback.settings.MpvOutputPreference.RENDER, next.preferences.expert.mpvOutput)
+        assertEquals(com.nuvio.tv.playback.core.FrameRatePreference.ON_START, next.preferences.playback.display.frameRate)
+        assertTrue(next.preferences.playback.display.resolutionMatching)
+        assertEquals(first.preferences.playback.audio, next.preferences.playback.audio)
+        assertEquals(first.preferences.playback.video, next.preferences.playback.video)
+        assertEquals(first.preferences, repository.load("2").preferences)
+        assertEquals(1, store.writeCount)
+        assertEquals(PlaybackCommand.PreferencesChanged(next.preferences.playback), next.initialCommand())
+    }
+
+    @Test
+    fun `unstored video defaults do not replace explicit clean engine and decoder choices`() = runTest {
+        val store = InMemoryStore()
+        val requested = com.nuvio.tv.playback.settings.CleanPlaybackPreferences.recommended().let {
+            it.copy(playback = it.playback.copy(
+                engine = EnginePreference.LIBMPV,
+                decoder = com.nuvio.tv.playback.core.DecoderPreference.SOFTWARE_ONLY,
+            ))
+        }
+        store.write("2", com.nuvio.tv.playback.settings.PlaybackPreferenceSchema.newDocument(requested))
+        val bootstrap = ProductionPlaybackPreferenceBootstrap(PlaybackPreferenceRepository(store)) {
+            LegacyPlayerSettingsSnapshotMapper.map(PlayerSettings(), "player-settings-v1", emptySet())
+        }
+        val loaded = bootstrap.load("2")
+        assertEquals(requested.playback.engine, loaded.preferences.playback.engine)
+        assertEquals(requested.playback.decoder, loaded.preferences.playback.decoder)
+        assertEquals(1, store.writeCount)
     }
 
     private class InMemoryStore : PlaybackPreferenceDocumentStore {

@@ -271,12 +271,27 @@ internal class ProductionPlaybackPreferenceBootstrap(
 ) {
     suspend fun load(profileId: String): BootstrappedPlaybackPreferences {
         require(profileId.isNotBlank()) { "Playback preference profile id must not be blank" }
-        val result = repository.loadOrImportLegacyIfAbsent(profileId) {
-            legacySource.snapshot(profileId)
-        }
+        // Re-read the existing user-facing video choices for each new player session.
+        // Keep the clean document (and its unrelated settings) intact; this is not a re-import.
+        val current = legacySource.snapshot(profileId)
+        val result = repository.loadOrImportLegacyIfAbsent(profileId) { current }
+        val stored = result.snapshot.preferences
+        val video = com.nuvio.tv.playback.settings.LegacyPlaybackPreferenceImporter.map(current).preferences
+        val hasEngine = "internalPlayerEngine" in current.storedFieldNames
+        val hasFallback = "autoSwitchInternalPlayerOnError" in current.storedFieldNames
+        val hasDecoder = "mpvHardwareDecodeMode" in current.storedFieldNames
+        val preferences = stored.copy(
+            playback = stored.playback.copy(
+                engine = if (hasEngine) video.playback.engine else stored.playback.engine,
+                automaticFallback = if (hasFallback) video.playback.automaticFallback else stored.playback.automaticFallback,
+                decoder = if (hasDecoder) video.playback.decoder else stored.playback.decoder,
+                display = video.playback.display,
+            ),
+            expert = if (hasDecoder) video.expert else stored.expert,
+        )
         return BootstrappedPlaybackPreferences(
             profileId = profileId,
-            preferences = result.snapshot.preferences,
+            preferences = preferences,
             importedLegacy = result.imported,
         )
     }

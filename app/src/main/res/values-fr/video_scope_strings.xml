@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="video_scope_live_title">TV en direct</string>
+    <string name="video_scope_live_note">Le mode HDMI reste fixe pour éviter les coupures. Les changements de lecteur et de décodage compatibles prennent effet à la prochaine ouverture du lecteur TV.</string>
+    <string name="video_scope_movies_title">Films et séries</string>
+    <string name="video_resolution_requires_frame_rate">Activez l’adaptation de fréquence ci-dessus pour utiliser l’adaptation de résolution.</string>
+    <string name="video_scope_dolby_note">Pour les films et séries compatibles lus avec ExoPlayer. Ces options ne changent pas le réglage HDR du Fire TV ou de la télévision.</string>
+    <string name="video_scope_mpv_note">Les modes détaillés concernent les films et séries avec MPV. La TV en direct reprend les choix de décodage et de sortie compatibles à sa prochaine ouverture.</string>
+</resources>

@@ -54,13 +54,16 @@ internal fun PlaybackVideoSection(
     onOpenDialog: (PlaybackDialog) -> Unit
 ) {
     val enabled = settings.playerPreference != PlayerPreference.EXTERNAL
+    val frameRateEnabled = settings.frameRateMatchingMode != FrameRateMatchingMode.OFF
     val displayCapabilities = rememberDisplayCapabilities()
     val frameRateFocusRequester = remember { FocusRequester() }
     val resolutionSwitchingSupported = !displayCapabilities.apiSupported ||
         displayCapabilities.supportsResolutionSwitching
-    val showAfrWarning = settings.frameRateMatchingMode != FrameRateMatchingMode.OFF ||
-        (settings.resolutionMatchingEnabled && !resolutionSwitchingSupported)
+    val showAfrWarning = frameRateEnabled
 
+    SettingsSectionLabel(text = stringResource(R.string.video_scope_live_title))
+    SettingsNote(text = stringResource(R.string.video_scope_live_note))
+    SettingsSectionLabel(text = stringResource(R.string.video_scope_movies_title))
     SettingsSectionLabel(text = stringResource(R.string.playback_auto_frame_rate))
     SettingsActionRow(
         title = stringResource(R.string.playback_afr_mode),
@@ -75,23 +78,26 @@ internal fun PlaybackVideoSection(
     SettingsToggleRow(
         title = stringResource(R.string.playback_resolution_matching),
         subtitle = stringResource(
-            if (resolutionSwitchingSupported) R.string.playback_resolution_matching_sub
-            else R.string.playback_resolution_matching_unsupported_sub
+            when {
+                !frameRateEnabled -> R.string.video_resolution_requires_frame_rate
+                resolutionSwitchingSupported -> R.string.playback_resolution_matching_sub
+                else -> R.string.playback_resolution_matching_unsupported_sub
+            }
         ),
-        checked = settings.resolutionMatchingEnabled,
+        checked = settings.resolutionMatchingEnabled && frameRateEnabled,
         onToggle = { onUpdate { setResolutionMatchingEnabled(!settings.resolutionMatchingEnabled) } },
-        titleTrailingIcon = if (settings.resolutionMatchingEnabled && !resolutionSwitchingSupported) {
+        titleTrailingIcon = if (frameRateEnabled && settings.resolutionMatchingEnabled && !resolutionSwitchingSupported) {
             Icons.Default.Warning
         } else {
             null
         },
         titleTrailingIconTint = NuvioTheme.colors.Warning,
-        enabled = enabled
+        enabled = enabled && frameRateEnabled
     )
     AfrCapabilityWarningCard(
         snapshot = displayCapabilities,
         afrModeOn = settings.frameRateMatchingMode != FrameRateMatchingMode.OFF,
-        resolutionMatchingOn = settings.resolutionMatchingEnabled,
+        resolutionMatchingOn = settings.resolutionMatchingEnabled && frameRateEnabled,
         onDisableAll = { onUpdate { disableAfrAndResolution() } },
         onDisableAfrOnly = { onUpdate { setFrameRateMatchingMode(FrameRateMatchingMode.OFF) } },
         onDisableResolutionOnly = { onUpdate { setResolutionMatchingEnabled(false) } },
@@ -101,6 +107,7 @@ internal fun PlaybackVideoSection(
     if (settings.usesExoPlayerEngine) {
         val dv81Conversion = settings.dv7HandlingMode == Dv7HandlingMode.DV81_LIBDOVI
         SettingsSectionLabel(text = stringResource(R.string.playback_dv_hdr_label))
+        SettingsNote(text = stringResource(R.string.video_scope_dolby_note))
         SettingsActionRow(
             title = stringResource(R.string.dv7_handling_title),
             subtitle = null,
@@ -135,6 +142,7 @@ internal fun PlaybackVideoSection(
 
     if (settings.usesMpvEngine) {
         SettingsSectionLabel(text = stringResource(R.string.playback_mpv_decoding_label))
+        SettingsNote(text = stringResource(R.string.video_scope_mpv_note))
         SettingsActionRow(
             title = stringResource(R.string.audio_mpv_hwdec_title),
             subtitle = null,
