@@ -94,7 +94,6 @@ import androidx.annotation.StringRes
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.Button
@@ -470,6 +469,7 @@ fun LiveGuide(
     Box(
         Modifier
             .fillMaxSize()
+            .background(if (fullscreen) Color.Black else Color(0xFF111518))
             // Fullscreen key handling. Focus stays locked on the (hidden) channel row, so keys
             // arrive there — intercept them in the preview phase before the row's clickable.
             // BACK is NOT consumed (BackHandler collapses). UP/DOWN zap channels.
@@ -770,7 +770,7 @@ fun LiveGuide(
             // the standalone player uses. Without this the Android TV screensaver fires mid-stream
             // in the guide's fullscreen, which the legacy player prevented on its player view.
             val keepScreenOn = playbackUi?.let { CleanLivePlayerUiPolicy.present(it).keepScreenOn } == true
-            AndroidView(factory = { surfaceOwner }, update = { it.keepScreenOn = keepScreenOn }, modifier = Modifier.fillMaxSize())
+            GuideVideoSurface(owner = surfaceOwner, keepScreenOn = keepScreenOn, modifier = Modifier.fillMaxSize())
             // F08: where focus waits behind fullscreen video once the channel list has had it. The
             // guide's own rows can't take it back: the aimed channel's row may not be composed, and
             // landing on another would re-aim the guide.
@@ -1466,17 +1466,26 @@ internal fun PreviewInfoPane(
     Column(
         modifier = modifier.padding(horizontal = NuvioTheme.spacing.lg, vertical = NuvioTheme.spacing.md)
     ) {
+        val currentEpg = remember(epg, nowMs, viewedTimeMs) { epg?.let { GuideWindowRows.atTime(it, viewedTimeMs ?: nowMs) } }
+        val now = inspectedProgramme ?: currentEpg?.now
+        val airingNow = now != null && nowMs in now.startMs until now.endMs
         Text(
-            text = channelName ?: "",
-            style = MaterialTheme.typography.labelLarge,
-            color = NuvioTheme.colors.Primary,
+            text = now?.title ?: channelName.orEmpty(),
+            style = MaterialTheme.typography.titleLarge,
+            color = NuvioTheme.colors.TextPrimary,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        val currentEpg = remember(epg, nowMs, viewedTimeMs) { epg?.let { GuideWindowRows.atTime(it, viewedTimeMs ?: nowMs) } }
-        val now = inspectedProgramme ?: currentEpg?.now
-        val airingNow = now != null && nowMs in now.startMs until now.endMs
+        if (now != null) {
+            Text(
+                text = channelName.orEmpty(),
+                style = MaterialTheme.typography.labelMedium,
+                color = NuvioTheme.colors.TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         if (previewError != null) {
             // A playback notice for the focused channel — takes the info slot so it never covers
             // the channel grid; the list stays focusable so OK on the channel re-tunes.
@@ -1489,15 +1498,6 @@ internal fun PreviewInfoPane(
                 overflow = TextOverflow.Ellipsis
             )
         } else if (now != null) {
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = now.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = NuvioTheme.colors.TextPrimary,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -1512,7 +1512,7 @@ internal fun PreviewInfoPane(
                 val progress = ((nowMs - now.startMs).toFloat() / durationMs).coerceIn(0f, 1f)
                 Box(
                     Modifier
-                        .weight(1f)
+                        .width(44.dp)
                         .height(3.dp)
                         .clip(RoundedCornerShape(NuvioTheme.radii.xxs))
                         .background(NuvioTheme.colors.Border)
@@ -1609,7 +1609,7 @@ private fun LiveRetryStatus(
 private fun timeRange(p: XtreamProgram): String = "${guideHhMm(p.startMs)}–${guideHhMm(p.endMs)}"
 
 private val CATEGORY_COL_WIDTH = 220.dp
-private val GUIDE_START_PADDING = 52.dp                   // the app-wide content gutter (Modern rails)
+private val GUIDE_START_PADDING = 16.dp                   // compact TV-guide gutter
 private const val GUIDE_SKELETON_ROW_COUNT = 10
 
 /** F01: type a channel name for the guide's Search row. The keyboard opens with the dialog. */
