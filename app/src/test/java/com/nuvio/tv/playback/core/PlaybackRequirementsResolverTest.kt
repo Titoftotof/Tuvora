@@ -111,7 +111,7 @@ class PlaybackRequirementsResolverTest {
     }
 
     @Test
-    fun `fullscreen admits supported output preferences and rejects unproven forced HDR`() = runTest {
+    fun `VOD fullscreen admits supported output preferences and rejects unproven forced HDR`() = runTest {
         val preferences = PlaybackPreferences(
             audio = AudioPreference(output = AudioOutputPreference.PASSTHROUGH),
             display = DisplayPreference(
@@ -123,6 +123,7 @@ class PlaybackRequirementsResolverTest {
         val resolved = resolve(
             input(
                 profile = SessionProfile.FULLSCREEN,
+                summary = requestSummary(contentType = ContentType.VOD),
                 evidence = adaptiveHls,
                 preferences = preferences,
                 capabilities = capabilities(
@@ -143,10 +144,11 @@ class PlaybackRequirementsResolverTest {
     }
 
     @Test
-    fun `fullscreen AFR does not depend on resolution matching`() = runTest {
+    fun `VOD fullscreen AFR does not depend on resolution matching`() = runTest {
         val resolved = resolve(
             input(
                 profile = SessionProfile.FULLSCREEN,
+                summary = requestSummary(contentType = ContentType.VOD),
                 evidence = adaptiveHls,
                 preferences = PlaybackPreferences(
                     display = DisplayPreference(
@@ -530,16 +532,24 @@ class PlaybackRequirementsResolverTest {
     }
 
     @Test
-    fun `live fullscreen matches the display frame rate automatically even when stored OFF`() = runTest {
-        // Owner decision 2026-10-02: live frame-rate matching is automatic. Upgraded installs
-        // carry OFF from the one-shot legacy import, and no screen can change it, so OFF must not
-        // leave 25p channels juddering on a 59.94 Hz output.
-        val storedOff = PlaybackPreferences(display = DisplayPreference(frameRate = FrameRatePreference.OFF))
-        val resolved = resolve(input(profile = SessionProfile.FULLSCREEN, preferences = storedOff))
-
-        assertTrue(resolved.displayModeSwitchAllowed)
-        assertEquals(FrameRatePreference.ON_START, resolved.frameRatePreference)
-        assertFalse(resolved.retainDisplayMode)
+    fun `live keeps one HDMI mode across preview and fullscreen for every stored display preference`() = runTest {
+        for (frameRate in FrameRatePreference.entries) {
+            for (resolutionMatching in listOf(false, true)) {
+                val preferences = PlaybackPreferences(display = DisplayPreference(
+                    frameRate = frameRate, resolutionMatching = resolutionMatching,
+                ))
+                val guide = resolve(input(profile = SessionProfile.GUIDE, preferences = preferences))
+                val fullscreen = resolve(input(profile = SessionProfile.FULLSCREEN, preferences = preferences))
+                for (resolved in listOf(guide, fullscreen)) {
+                    assertFalse(resolved.displayModeSwitchAllowed)
+                    assertFalse(resolved.resolutionMatchingEnabled)
+                    assertEquals(FrameRatePreference.OFF, resolved.frameRatePreference)
+                    assertTrue(resolved.retainDisplayMode)
+                }
+                val diff = PlaybackRequirementsDiffClassifier.classify(guide, fullscreen)
+                assertEquals(diff.changedFields.toString(), ChangeImpact.APPLY_IN_PLACE, diff.impact)
+            }
+        }
     }
 
     @Test

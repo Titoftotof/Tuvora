@@ -488,14 +488,11 @@ class DefaultPlaybackRequirementsResolver(
         // handoff after libmpv failed, DRM, or an explicit pin — start it without the cosmetic
         // processing it cannot apply rather than fail every attempt.
         val dropMedia3Processing = media3UnsupportedProcessing && eligibleEngines == setOf(EngineType.MEDIA3)
-        // Live frame-rate matching is automatic (owner decision 2026-10-02): 25p/50p channels on a
-        // 59.94 Hz output judder on every pan, and upgraded installs carry a stored OFF from the
-        // one-shot legacy import that no screen can change. A stronger stored choice still wins.
-        val effectiveFrameRate = if (live && preferences.display.frameRate == FrameRatePreference.OFF) {
-            FrameRatePreference.ON_START
-        } else {
-            preferences.display.frameRate
-        }
+        // Live prioritizes uninterrupted guide/fullscreen transitions: keep the existing HDMI
+        // mode throughout the session. Non-seamless matching caused a blackout and a Fire OS
+        // system pause on first promotion, then another handshake when leaving IPTV.
+        // VOD/catch-up continue to honor their stored display preferences.
+        val effectiveFrameRate = if (live) FrameRatePreference.OFF else preferences.display.frameRate
         // F13: a chosen live buffer length is a CUSTOM buffer for live in BOTH profiles (guide and
         // fullscreen agree, so a promote still applies in place); AUTO keeps LOW_LATENCY_LIVE.
         val liveCustomBuffer = if (live) LiveBufferPolicy.customBuffer(liveBufferSeconds) else null
@@ -513,12 +510,12 @@ class DefaultPlaybackRequirementsResolver(
                 preferredAdaptiveDimensions = preferredDimensions,
                 adaptiveDimensionCeiling = adaptiveCeiling,
                 bitrateCeiling = environment.resourceBudget.networkBitrateCeiling.takeIf { adaptive },
-                displayModeSwitchAllowed = !guide &&
+                displayModeSwitchAllowed = !guide && !live &&
                     capabilities.display.modeSwitchSupported &&
                     (effectiveFrameRate != FrameRatePreference.OFF ||
                         preferences.display.resolutionMatching),
-                retainDisplayMode = guide && live,
-                resolutionMatchingEnabled = !guide && preferences.display.resolutionMatching,
+                retainDisplayMode = live,
+                resolutionMatchingEnabled = !guide && !live && preferences.display.resolutionMatching,
                 frameRatePreference = if (guide) FrameRatePreference.OFF else effectiveFrameRate,
                 hdrPreference = effectiveHdr,
                 decoderPreference = preferences.decoder,
