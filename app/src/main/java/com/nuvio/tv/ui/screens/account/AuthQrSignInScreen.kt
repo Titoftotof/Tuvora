@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -60,6 +62,7 @@ import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.R
 import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.domain.model.AuthState
@@ -230,7 +233,8 @@ fun AuthQrSignInScreen(
                         leaveAuthScreen()
                     }
                 },
-                onNavigateToEmailSignIn = onNavigateToEmailSignIn
+                onNavigateToEmailSignIn = onNavigateToEmailSignIn,
+                onSwitchBackend = viewModel::switchDebugBackend
             )
         }
     }
@@ -325,8 +329,10 @@ private fun AuthQrLoginPane(
     onSignIn: (String, String) -> Unit,
     onRefreshOrSignOut: () -> Unit,
     onBackOrContinue: () -> Unit,
-    onNavigateToEmailSignIn: (() -> Unit)?
+    onNavigateToEmailSignIn: (() -> Unit)?,
+    onSwitchBackend: () -> Unit
 ) {
+    var showServerPicker by remember { mutableStateOf(false) }
     // Default focus to "Continue without account" during onboarding so it's reachable
     // immediately (otherwise focus lands on the inline "Terms" link and is awkward to escape).
     val continueFocus = remember { FocusRequester() }
@@ -335,13 +341,18 @@ private fun AuthQrLoginPane(
             runCatching { continueFocus.requestFocus() }
         }
     }
-    Column(
-        modifier = modifier
-            .padding(horizontal = 48.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
+    BoxWithConstraints(modifier = modifier) {
+        val qrSize = if (maxHeight < 600.dp) 160.dp else 206.dp
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                // Keep the scroll viewport itself inside the TV safe area.
+                .padding(horizontal = 48.dp, vertical = 24.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Top
+        ) {
         Text(
             text = if (isSignedIn) {
                 stringResource(R.string.auth_qr_synced_data)
@@ -365,7 +376,7 @@ private fun AuthQrLoginPane(
             ),
             textAlign = TextAlign.Center
         )
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         if (isSignedIn && !isOnboardingMode) {
             AccountConnectedStatsStrip(
@@ -384,10 +395,10 @@ private fun AuthQrLoginPane(
                 onSignIn = onSignIn
             )
         } else {
-            AuthQrCodeBlock(uiState = uiState, remainingMillis = remainingMillis)
+            AuthQrCodeBlock(uiState = uiState, remainingMillis = remainingMillis, qrSize = qrSize)
         }
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(16.dp))
         Row(
             horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md),
             verticalAlignment = Alignment.CenterVertically
@@ -469,6 +480,29 @@ private fun AuthQrLoginPane(
             ) {
                 Text(stringResource(R.string.auth_qr_email_sign_in))
             }
+        }
+        Spacer(modifier = Modifier.height(NuvioTheme.spacing.md))
+        if (uiState.debugBackendSwitchEnabled) {
+            Button(
+                onClick = { showServerPicker = true },
+                colors = ButtonDefaults.colors(
+                    containerColor = AuthSecondaryButtonBackground,
+                    contentColor = AuthTextPrimary,
+                    focusedContainerColor = Color.White,
+                    focusedContentColor = Color.Black,
+                ),
+            ) {
+                Text(stringResource(if (uiState.syncBackendId == "nuvio") R.string.workspace_official else R.string.workspace_personal))
+            }
+        }
+        }
+    }
+    if (showServerPicker) {
+        NuvioDialog(
+            onDismiss = { showServerPicker = false },
+            title = stringResource(R.string.workspace_title),
+        ) {
+            DebugSyncBackendSwitchCard(uiState, requireConfirmation = true, onSwitchBackend = onSwitchBackend)
         }
     }
 }
@@ -552,44 +586,38 @@ private fun AuthEmailLoginForm(
 @Composable
 private fun AuthQrCodeBlock(
     uiState: AccountUiState,
-    remainingMillis: Long
+    remainingMillis: Long,
+    qrSize: Dp
 ) {
-    val qrBitmap = uiState.qrLoginBitmap
-    if (qrBitmap != null) {
-        Image(
-            bitmap = qrBitmap.asImageBitmap(),
-            contentDescription = stringResource(R.string.cd_qr_login),
-            modifier = Modifier
-                .size(206.dp)
-                .background(Color.White, RoundedCornerShape(8.dp))
-                .padding(8.dp),
-            contentScale = ContentScale.Fit
-        )
-    } else {
-        Box(
-            modifier = Modifier
-                .size(206.dp)
-                .background(AuthSecondaryButtonBackground, RoundedCornerShape(8.dp))
-                .border(1.dp, AuthSecondaryButtonBorder, RoundedCornerShape(8.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = if (uiState.isLoading) stringResource(R.string.auth_qr_generating) else stringResource(R.string.auth_qr_unavailable),
-                color = AuthTextSecondary,
-                textAlign = TextAlign.Center
-            )
-        }
-    }
-
-    // UX86: only a short user_code is typeable; the long session code is never offered.
+    // Only a short user_code is typeable; the long session code is never offered.
     val manualCode = AuthQrCopyPolicy.manualCode(uiState.qrLoginVerificationUri, uiState.qrLoginUserCode)
-    AuthQrManualCodeDetails(
-        verificationUri = manualCode?.verificationUri,
-        qrLoginCode = manualCode?.code,
-        expiresAtMillis = uiState.qrLoginExpiresAtMillis,
-        remainingMillis = remainingMillis,
-        isLoading = uiState.isLoading
-    )
+    if (qrSize < 206.dp && manualCode != null) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AuthQrImage(uiState, qrSize)
+            Column(modifier = Modifier.weight(1f)) {
+                AuthQrManualCodeDetails(
+                    verificationUri = manualCode.verificationUri,
+                    qrLoginCode = manualCode.code,
+                    expiresAtMillis = uiState.qrLoginExpiresAtMillis,
+                    remainingMillis = remainingMillis,
+                    isLoading = uiState.isLoading
+                )
+            }
+        }
+    } else {
+        AuthQrImage(uiState, qrSize)
+        AuthQrManualCodeDetails(
+            verificationUri = manualCode?.verificationUri,
+            qrLoginCode = manualCode?.code,
+            expiresAtMillis = uiState.qrLoginExpiresAtMillis,
+            remainingMillis = remainingMillis,
+            isLoading = uiState.isLoading
+        )
+    }
 
     Spacer(modifier = Modifier.height(12.dp))
     AuthTermsAcknowledgement()
@@ -610,6 +638,36 @@ private fun AuthQrCodeBlock(
                 color = AuthTextSecondary,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun AuthQrImage(uiState: AccountUiState, qrSize: Dp) {
+    val qrBitmap = uiState.qrLoginBitmap
+    if (qrBitmap != null) {
+        Image(
+            bitmap = qrBitmap.asImageBitmap(),
+            contentDescription = stringResource(R.string.cd_qr_login),
+            modifier = Modifier
+                .size(qrSize)
+                .background(Color.White, RoundedCornerShape(8.dp))
+                .padding(8.dp),
+            contentScale = ContentScale.Fit
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(qrSize)
+                .background(AuthSecondaryButtonBackground, RoundedCornerShape(8.dp))
+                .border(1.dp, AuthSecondaryButtonBorder, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (uiState.isLoading) stringResource(R.string.auth_qr_generating) else stringResource(R.string.auth_qr_unavailable),
+                color = AuthTextSecondary,
+                textAlign = TextAlign.Center
             )
         }
     }
@@ -882,6 +940,40 @@ private fun Modifier.authGradientBackground(): Modifier = drawWithCache {
     )
     onDrawBehind {
         drawRect(brush = brush)
+    }
+}
+
+@androidx.compose.ui.tooling.preview.Preview(
+    name = "Connexion QR - 720p", widthDp = 460, heightDp = 540, locale = "fr"
+)
+@androidx.compose.ui.tooling.preview.Preview(
+    name = "Connexion QR - petite hauteur", widthDp = 460, heightDp = 480, locale = "fr"
+)
+@Composable
+private fun AuthQrLoginPanePreview() {
+    val bitmap = remember {
+        com.nuvio.tv.core.qr.QrCodeGenerator.generate("https://example.com/activate")
+    }
+    NuvioTheme {
+        AuthQrLoginPane(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            uiState = AccountUiState(
+                qrLoginBitmap = bitmap,
+                qrLoginUserCode = "ABC123",
+                qrLoginVerificationUri = "https://example.com/activate",
+                qrLoginStatus = "En attente de validation sur votre téléphone…",
+                debugBackendSwitchEnabled = true
+            ),
+            isSignedIn = false,
+            isOnboardingMode = false,
+            selfHosted = false,
+            remainingMillis = 120_000,
+            onSignIn = { _, _ -> },
+            onRefreshOrSignOut = {},
+            onBackOrContinue = {},
+            onNavigateToEmailSignIn = {},
+            onSwitchBackend = {}
+        )
     }
 }
 

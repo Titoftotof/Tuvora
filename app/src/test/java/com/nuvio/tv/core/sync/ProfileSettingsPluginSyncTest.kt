@@ -320,6 +320,47 @@ class ProfileSettingsPluginSyncTest {
         }
     }
 
+    @Test
+    fun `addons copy independently and preserve the target sync baseline`() = runTest(dispatcher) {
+        val harness = harness()
+        val urls = stringPreferencesKey("installed_addon_urls_ordered")
+        val states = stringPreferencesKey("installed_addon_enabled_states")
+        val names = stringPreferencesKey("addon_user_set_names")
+        val baseline = stringPreferencesKey("synced_addon_urls")
+        harness.store(1, "addon_preferences").edit {
+            it[urls] = """["https://source/config"]"""
+            it[states] = """{"https://source/config":false}"""
+            it[names] = """{"https://source/config":"Custom"}"""
+            it[baseline] = "source baseline"
+        }
+        harness.store(2, "addon_preferences").edit {
+            it[urls] = """["https://target"]"""
+            it[baseline] = "target baseline"
+        }
+        val none = com.nuvio.tv.core.profile.ProfileCopyOptions(copySettings = false)
+        harness.service.copyProfileSetup(1, 2, none).getOrThrow()
+        assertEquals("""["https://target"]""", harness.store(2, "addon_preferences").value[urls])
+        harness.service.copyProfileSetup(1, 2, none.copy(copyAddons = true)).getOrThrow()
+        for (key in listOf(urls, states, names)) {
+            assertEquals(harness.store(1, "addon_preferences").value[key],
+                harness.store(2, "addon_preferences").value[key])
+        }
+        assertEquals("target baseline", harness.store(2, "addon_preferences").value[baseline])
+        harness.store(1, "addon_preferences").edit { it[urls] = "[]" }
+        assertEquals("""["https://source/config"]""", harness.store(2, "addon_preferences").value[urls])
+    }
+
+    @Test
+    fun `copy addons from a shared source resolves the primary profile`() = runTest(dispatcher) {
+        val harness = harness()
+        val urls = stringPreferencesKey("installed_addon_urls_ordered")
+        harness.store(1, "addon_preferences").edit { it[urls] = """["https://primary"]""" }
+        harness.store(3, "addon_preferences").edit { it[urls] = """["https://unused"]""" }
+        harness.service.copyProfileSetup(3, 2,
+            com.nuvio.tv.core.profile.ProfileCopyOptions(copySettings = false, copyAddons = true)).getOrThrow()
+        assertEquals("""["https://primary"]""", harness.store(2, "addon_preferences").value[urls])
+    }
+
     private fun harness(profileId: Int = 1, authenticated: Boolean = false): Harness {
         val stores = mutableMapOf<Pair<Int, String>, TestPreferencesStore>()
         val factory = mockk<ProfileDataStoreFactory>()
@@ -333,7 +374,7 @@ class ProfileSettingsPluginSyncTest {
         val profiles = MutableStateFlow(listOf(
             UserProfile(1, "Primary", "#000000"),
             UserProfile(2, "Independent", "#000000"),
-            UserProfile(3, "Shared", "#000000", usesPrimaryPlugins = true)
+            UserProfile(3, "Shared", "#000000", usesPrimaryAddons = true, usesPrimaryPlugins = true)
         ))
         val profileManager = mockk<ProfileManager>()
         every { profileManager.activeProfileId } returns activeProfileId

@@ -6,7 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.preferencesDataStoreFile
 import com.nuvio.tv.domain.model.MemberTier
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -14,16 +14,20 @@ import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val Context.debugDataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "debug_settings",
-    corruptionHandler = androidx.datastore.core.handlers.ReplaceFileCorruptionHandler { androidx.datastore.preferences.core.emptyPreferences() }
-)
+
 
 @Singleton
 class DebugSettingsDataStore @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val dataStore = context.debugDataStore
+    private val dataStore = androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(
+        corruptionHandler = androidx.datastore.core.handlers.ReplaceFileCorruptionHandler {
+            androidx.datastore.preferences.core.emptyPreferences()
+        },
+        produceFile = {
+            java.io.File(com.nuvio.tv.core.network.BackendWorkspaceStore.deviceContext(context).filesDir, "datastore/debug_settings.preferences_pb")
+        }
+    )
 
     private val accountTabEnabledKey = booleanPreferencesKey("account_tab_enabled")
     private val syncCodeFeaturesEnabledKey = booleanPreferencesKey("sync_code_features_enabled")

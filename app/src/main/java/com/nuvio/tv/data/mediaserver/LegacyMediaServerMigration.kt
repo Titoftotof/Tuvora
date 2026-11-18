@@ -49,7 +49,7 @@ internal class AndroidLegacyMediaServerSource(private val context: Context) : Le
     private val serversName = "nuvio_mediaserver"
     private val tokensName = "nuvio_mediaserver_tokens"
 
-    private fun exists(name: String) = java.io.File(context.applicationInfo.dataDir, "shared_prefs/$name.xml").exists()
+    private fun exists(name: String) = context.getSharedPreferences(name, Context.MODE_PRIVATE).all.isNotEmpty()
 
     override fun hasAnyData(): Boolean = exists(serversName) || exists(tokensName)
 

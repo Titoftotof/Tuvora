@@ -335,7 +335,19 @@ class ProfileSettingsSyncService @Inject constructor(
                     require(profileManager.profiles.value.any { it.id == targetProfileId })
                     check(profileLocks.pinEnabled.first()[sourceProfileId] != true ||
                         profileManager.activeProfileId.value == sourceProfileId) { "Unlock the source profile before copying" }
+                    val sourceAddonsProfileId = if (profileManager.profiles.value
+                            .first { it.id == sourceProfileId }.usesPrimaryAddons) 1 else sourceProfileId
+                    if (options.copyAddons) {
+                        check(profileManager.profiles.value.first { it.id == targetProfileId }.usesPrimaryAddons.not()) {
+                            "Disable shared primary addons on the target profile before copying"
+                        }
+                        check(profileLocks.pinEnabled.first()[sourceAddonsProfileId] != true ||
+                            profileManager.activeProfileId.value == sourceAddonsProfileId) {
+                            "Unlock the addon source profile before copying"
+                        }
+                    }
                     val touched = (syncedFeatures + listOf(
+                        "addon_preferences",
                         "xtream_accounts", "xtream_sync_state", "iptv_home_categories", "library_preferences",
                         "watched_items_preferences", "watch_progress_preferences",
                         "watch_progress_recent_preferences", "watch_progress_archive_preferences"
@@ -353,6 +365,18 @@ class ProfileSettingsSyncService @Inject constructor(
                             featuresJson = targetFeatures,
                             signature = buildSettingsSignature(targetFeatures)
                         )
+                    }
+
+                    if (options.copyAddons) {
+                        val source = profileDataStoreFactory.get(sourceAddonsProfileId, "addon_preferences").data.first()
+                        // Keep the target's merge baseline: these addons have not been synced for it yet.
+                        val keys = listOf("installed_addon_urls_ordered", "installed_addon_urls",
+                            "addon_user_set_names", "installed_addon_enabled_states")
+                        val entries = source.asMap().filterKeys { it.name in keys }
+                        profileDataStoreFactory.get(targetProfileId, "addon_preferences").edit { target ->
+                            keys.forEach { target.remove(stringPreferencesKey(it)) }
+                            restorePreferenceEntries(target, entries)
+                        }
                     }
 
                     if (options.copyOtherConnections) {

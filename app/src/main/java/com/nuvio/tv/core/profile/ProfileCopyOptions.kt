@@ -7,6 +7,7 @@ package com.nuvio.tv.core.profile
  *
  * | Rubrique          | Contenu                                                 | Valeur initiale |
  * |-------------------|---------------------------------------------------------|-----------------|
+ * | Addons            | Extensions, ordre, noms et activation                   | Désactivée      |
  * | IPTV              | Connexions, playlists et préférences IPTV               | Désactivée      |
  * | Autres connexions | Clés et connexions autorisées à être copiées            | Désactivée      |
  * | Réglages          | Apparence, lecture et accueil                           | Activée         |
@@ -27,11 +28,14 @@ data class ProfileCopyOptions(
     val copyFavorites: Boolean = false,
 
     /** Copy local watch progress and history. */
-    val copyHistory: Boolean = false
+    val copyHistory: Boolean = false,
+
+    /** Copy installed addons, their order, names and enabled states independently. */
+    val copyAddons: Boolean = false
 ) {
     /** Whether any data is selected for copying at all. */
     val hasAnySelection: Boolean
-        get() = copyIptv || copyOtherConnections || copySettings || copyFavorites || copyHistory
+        get() = copyIptv || copyOtherConnections || copySettings || copyFavorites || copyHistory || copyAddons
 
     companion object {
         /** Default configuration for a fresh profile copy. */
@@ -43,7 +47,8 @@ data class ProfileCopyOptions(
             copyOtherConnections = true,
             copySettings = true,
             copyFavorites = true,
-            copyHistory = true
+            copyHistory = true,
+            copyAddons = true
         )
     }
 }

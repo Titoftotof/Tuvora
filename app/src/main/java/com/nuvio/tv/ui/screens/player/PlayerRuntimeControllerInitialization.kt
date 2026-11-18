@@ -283,7 +283,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                     resizeMode = playerSettings.resizeMode,
                     // F37: a series' remembered aspect (restoreSeriesPicture) survives re-inits.
                     aspectMode = if (seriesPictureApplied) it.aspectMode else deviceAspectMode,
-                    tunneledSurfaceFill = tunneledSurfaceFill,
+                    tunneledSurfaceFill = if (seriesPictureApplied) it.tunneledSurfaceFill else tunneledSurfaceFill,
                     playbackIssueReportsEnabled = playerSettings.playbackIssueReportsEnabled,
                     tunnelingEnabled = playerSettings.tunnelingEnabled &&
                             effectiveInternalPlayerEngine != InternalPlayerEngine.MVP_PLAYER

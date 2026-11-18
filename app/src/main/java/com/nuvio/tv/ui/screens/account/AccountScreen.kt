@@ -91,6 +91,14 @@ fun AccountScreen(
             Spacer(modifier = Modifier.height(NuvioTheme.spacing.sm))
         }
 
+        item {
+            DebugSyncBackendSwitchCard(
+                uiState = uiState,
+                requireConfirmation = true,
+                onSwitchBackend = viewModel::switchDebugBackend
+            )
+        }
+
         when (val authState = uiState.authState) {
             is AuthState.Loading -> {
                 item {

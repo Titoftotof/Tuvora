@@ -6,9 +6,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.R
-import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.core.auth.AuthManager
-import com.nuvio.tv.core.build.AppFeaturePolicy
 import com.nuvio.tv.core.plugin.PluginManager
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.core.qr.QrCodeGenerator
@@ -136,7 +134,7 @@ class AccountViewModel @Inject constructor(
                     it.copy(
                         syncBackendId = state.selectedBackend.id,
                         syncBackendName = state.selectedBackend.displayName,
-                        debugBackendSwitchEnabled = AppFeaturePolicy.debugBackendSwitcherEnabled && selectableBackendCount >= 2,
+                        debugBackendSwitchEnabled = selectableBackendCount >= 2,
                     )
                 }
             }
@@ -144,6 +142,7 @@ class AccountViewModel @Inject constructor(
     }
 
     fun switchDebugBackend() {
+        if (_uiState.value.isDebugBackendSwitching) return
         viewModelScope.launch {
             val currentBackendId = _uiState.value.syncBackendId
             val targetBackend = if (currentBackendId == SYNC_BACKEND_NUVIO_ID) {
@@ -172,8 +171,8 @@ class AccountViewModel @Inject constructor(
                 onSuccess = {
                     _uiState.update {
                         it.copy(
-                            isLoading = false,
-                            isDebugBackendSwitching = false,
+                            isLoading = true,
+                            isDebugBackendSwitching = true,
                             debugBackendSwitchError = null,
                             connectedStats = null,
                             isStatsLoading = false,
@@ -219,7 +218,7 @@ class AccountViewModel @Inject constructor(
                 onSuccess = {
                     // D1: a different account over kept data waits for the account-switch prompt.
                     if (authManager.signedInAccountOwnsLocalData()) pullRemoteData().onFailure { e ->
-                        Log.e("AccountViewModel", "signIn: pullRemoteData failed, continuing signed-in flow", e)
+                        Log.e("AccountViewModel", "signIn: pullRemoteData failed, continuing signed-in flow")
                     }
                     loadConnectedStats()
                     _uiState.update { it.copy(isLoading = false) }
@@ -276,7 +275,7 @@ class AccountViewModel @Inject constructor(
                     if (result.success) {
                         authManager.clearEffectiveUserIdCache()
                         pullRemoteData().onFailure { e ->
-                            Log.e("AccountViewModel", "claimSyncCode: pullRemoteData failed, continuing", e)
+                            Log.e("AccountViewModel", "claimSyncCode: pullRemoteData failed, continuing")
                         }
                         updateEffectiveOwnerId(_uiState.value.authState)
                         _uiState.update { it.copy(isLoading = false, syncClaimSuccess = true) }
@@ -359,9 +358,13 @@ class AccountViewModel @Inject constructor(
             authManager.startTvLoginSession(
                 deviceNonce = nonce,
                 deviceName = Build.MODEL,
-                redirectBaseUrl = BuildConfig.TV_LOGIN_WEB_BASE_URL
+                redirectBaseUrl = syncBackendRepository.selectedBackend.tvLoginWebBaseUrl
             ).fold(
                 onSuccess = { result ->
+                    if (!syncBackendRepository.selectedBackend.acceptsQrUrl(result.webUrl)) {
+                        _uiState.update { it.copy(isLoading = false, error = context.getString(R.string.account_error_qr_login_misconfigured)) }
+                        return@fold
+                    }
                     val expiresAtMillis = runCatching { Instant.parse(result.expiresAt).toEpochMilli() }.getOrNull()
                     val qrBitmap = runCatching { QrCodeGenerator.generate(result.webUrl, 420, margin = 1) }.getOrNull()
                     _uiState.update {
@@ -406,7 +409,7 @@ class AccountViewModel @Inject constructor(
                 onSuccess = {
                     // D1: a different account over kept data waits for the account-switch prompt.
                     if (authManager.signedInAccountOwnsLocalData()) pullRemoteData().onFailure { e ->
-                        Log.e("AccountViewModel", "exchangeQrLogin: pullRemoteData failed, continuing", e)
+                        Log.e("AccountViewModel", "exchangeQrLogin: pullRemoteData failed, continuing")
                     }
                     loadConnectedStats()
                     _uiState.update { it.copy(isLoading = false, qrLoginStatus = context.getString(R.string.qr_login_success)) }
@@ -556,8 +559,7 @@ class AccountViewModel @Inject constructor(
     private fun userFriendlyError(e: Throwable): String {
         val raw = e.message ?: ""
         val message = raw.lowercase()
-        val compactRaw = raw.lineSequence().firstOrNull()?.trim().orEmpty()
-        Log.w("AccountViewModel", "Raw error: $compactRaw")
+        Log.w("AccountViewModel", "Account operation failed: ${e.javaClass.simpleName}")
 
         val resId = when {
             // PIN errors (from PG RAISE EXCEPTION or any wrapper)
@@ -733,7 +735,7 @@ class AccountViewModel @Inject constructor(
                         )
                     },
                     onFailure = { e ->
-                        Log.e("AccountViewModel", "pullRemoteData: failed to pull library items", e)
+                        Log.e("AccountViewModel", "pullRemoteData: failed to pull library items")
                     }
                 )
                 libraryRepository.hasCompletedInitialPull = true

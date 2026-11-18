@@ -92,10 +92,8 @@ fun DebridSettingsContent(
     initialFocusRequester: FocusRequester? = null
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    // The first two rows are gated on a connected provider and cannot take focus without one,
-    // so the entry requester goes to the first row that can accept it. Left on a gated row the
-    // request is declined, focus stays on the category rail, and the next press walks the rail
-    // instead of entering these options.
+    // Prefer the first actionable row on entry. Gated options remain focusable for reading
+    // and scrolling, but their click handlers stay inactive until a provider is connected.
     //
     // The last of the three is the first account row, which is ungated and so always takes the
     // request. That rests on DebridProviders.visible() having something in it: it filters a fixed
@@ -159,7 +157,8 @@ fun DebridSettingsContent(
                                         Modifier
                                     }
                                 ),
-                            enabled = uiState.hasCloudLibraryProvider
+                            enabled = uiState.hasCloudLibraryProvider,
+                            focusableWhenDisabled = true
                         )
                     }
 
@@ -174,7 +173,8 @@ fun DebridSettingsContent(
                             } else {
                                 Modifier
                             },
-                            enabled = uiState.hasResolverProvider
+                            enabled = uiState.hasResolverProvider,
+                            focusableWhenDisabled = true
                         )
                     }
 
@@ -274,7 +274,8 @@ fun DebridSettingsContent(
                             subtitle = stringResource(R.string.debrid_formatter_subtitle),
                             value = stringResource(R.string.debrid_formatter_configure),
                             onClick = { viewModel.startFormatterQrMode() },
-                            enabled = uiState.enabled
+                            enabled = uiState.enabled,
+                            focusableWhenDisabled = true
                         )
                     }
 
@@ -284,7 +285,8 @@ fun DebridSettingsContent(
                             subtitle = stringResource(R.string.debrid_formatter_reset_subtitle),
                             value = stringResource(R.string.layout_reset_default),
                             onClick = { viewModel.resetFormatterTemplates() },
-                            enabled = uiState.enabled
+                            enabled = uiState.enabled,
+                            focusableWhenDisabled = true
                         )
                     }
 

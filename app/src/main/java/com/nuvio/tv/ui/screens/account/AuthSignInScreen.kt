@@ -32,6 +32,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -109,6 +111,7 @@ fun AuthSignInScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.5f)
+                .verticalScroll(rememberScrollState())
                 .background(
                     color = NuvioTheme.colors.BackgroundElevated,
                     shape = RoundedCornerShape(20.dp)

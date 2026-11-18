@@ -27,6 +27,7 @@ class ProfileManagerRemovedProfileDataTest {
     private lateinit var factory: ProfileDataStoreFactory
     private lateinit var credentialStore: ProfileScopedCredentialStore
     private lateinit var manager: ProfileManager
+    private lateinit var profileDataStore: ProfileDataStore
     private val storedProfiles = MutableStateFlow(listOf(profile(1), profile(2), profile(3)))
 
     @Before
@@ -35,7 +36,7 @@ class ProfileManagerRemovedProfileDataTest {
         val context = mockk<Context>(relaxed = true) {
             every { filesDir } returns tempDir
         }
-        val profileDataStore = mockk<ProfileDataStore>(relaxed = true) {
+        profileDataStore = mockk<ProfileDataStore>(relaxed = true) {
             every { profilesList } returns storedProfiles
             every { activeProfileId } returns flowOf(1)
             every { hasEverSelectedProfile } returns flowOf(true)
@@ -44,6 +45,11 @@ class ProfileManagerRemovedProfileDataTest {
             every { startupSplashEnabled } returns flowOf(true)
         }
         coEvery { profileDataStore.replaceAllProfiles(any()) } answers { storedProfiles.value = firstArg() }
+        coEvery { profileDataStore.replaceProfilesFromRemote(any(), any()) } answers {
+            val previousIds = storedProfiles.value.map { it.id }.toSet()
+            storedProfiles.value = firstArg()
+            previousIds
+        }
         coEvery { profileDataStore.deleteProfile(any()) } answers {
             storedProfiles.value = storedProfiles.value.filterNot { it.id == firstArg<Int>() }
         }
@@ -62,7 +68,7 @@ class ProfileManagerRemovedProfileDataTest {
         val removed = profileFiles(2)
         val kept = profileFiles(3) + file("datastore/library_preferences.preferences_pb")
 
-        manager.replaceAllProfiles(listOf(profile(1), profile(3)))
+        assertTrue(manager.applyRemoteProfiles(listOf(profile(1), profile(3)), 0L))
 
         removed.forEach { assertFalse("${it.path} should be deleted", it.exists()) }
         kept.forEach { assertTrue("${it.path} should be kept", it.exists()) }
@@ -73,7 +79,7 @@ class ProfileManagerRemovedProfileDataTest {
 
     @Test
     fun `profiles added on another device are not treated as deleted`() = runTest {
-        manager.replaceAllProfiles(listOf(profile(1), profile(2), profile(3), profile(4)))
+        assertTrue(manager.applyRemoteProfiles(listOf(profile(1), profile(2), profile(3), profile(4)), 0L))
 
         verify(exactly = 1) { factory.markProfileCreated(4) }
         verify(exactly = 0) { credentialStore.removeProfile(any()) }
@@ -91,6 +97,18 @@ class ProfileManagerRemovedProfileDataTest {
         removed.forEach { assertFalse("${it.path} should be deleted", it.exists()) }
         kept.forEach { assertTrue("${it.path} should be kept", it.exists()) }
         verify(exactly = 1) { credentialStore.removeProfile(2) }
+    }
+
+    @Test
+    fun `rejected stale response does not delete profile data`() = runTest {
+        val kept = profileFiles(2)
+        coEvery { profileDataStore.replaceProfilesFromRemote(any(), any()) } returns null
+
+        assertFalse(manager.applyRemoteProfiles(listOf(profile(1)), 0L))
+
+        kept.forEach { assertTrue("${it.path} should be kept", it.exists()) }
+        verify(exactly = 0) { credentialStore.removeProfile(any()) }
+        coVerify(exactly = 0) { factory.clearProfile(any()) }
     }
 
     private fun profileFiles(id: Int) = listOf(

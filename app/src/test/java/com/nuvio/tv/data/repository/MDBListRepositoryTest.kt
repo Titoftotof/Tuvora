@@ -260,6 +260,23 @@ class MDBListRepositoryTest {
         coVerify(exactly = 0) { api.getMediaBatch(any(), any(), any(), any()) }
     }
 
+    @Test
+    fun `IPTV playback ids use resolved TMDB identity for ratings`() = runTest {
+        val native = mockk<Meta> {
+            every { id } returns "xtream:panel:vod:123"
+            every { apiType } returns "movie"
+            every { imdbId } returns null
+            every { tmdbId } returns 27205
+        }
+        coEvery { api.getMedia("tmdb", "movie", "27205", "test-key", "keyword") } returns Response.success(media)
+
+        val result = repository(imdbSettings).getRatingsForMeta(native, native.id, "movie")
+
+        assertEquals(8.1, result?.ratings?.imdb)
+        assertEquals("xtream:panel:vod:123", native.id)
+        coVerify(exactly = 1) { api.getMedia("tmdb", "movie", "27205", "test-key", "keyword") }
+    }
+
     private fun TestScope.repository(initialSettings: MDBListSettings = settings): MDBListRepository {
         val store = mockk<MDBListSettingsDataStore>()
         preferences.value = initialSettings

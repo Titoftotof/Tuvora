@@ -126,5 +126,7 @@ private fun MetaPreview.toMdbMeta(): Meta = Meta(
     country = country,
     awards = null,
     language = language,
-    links = links
+    links = links,
+    imdbId = imdbId,
+    tmdbId = tmdbId
 )

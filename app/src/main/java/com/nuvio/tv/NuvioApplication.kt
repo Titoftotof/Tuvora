@@ -126,14 +126,21 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory, Configurat
     }
 
     override fun attachBaseContext(base: Context) {
+        if (com.nuvio.tv.core.network.WorkspaceRestartActivity.isRestartProcess(base)) {
+            super.attachBaseContext(base)
+            return
+        }
         // Install only prevalidated, device-encrypted files before Hilt, providers or DataStore open them.
-        com.nuvio.tv.core.profile.ProfileCopyJournal.recover(base)
-        com.nuvio.tv.core.backup.RestoreTransaction.installOrRecover(base)
-        com.nuvio.tv.core.backup.RestoreSyncHold.initialize(base)
-        super.attachBaseContext(base)
+        val workspace = com.nuvio.tv.core.network.BackendWorkspaceStore.wrap(base)
+        com.nuvio.tv.core.profile.ProfileCopyJournal.recover(workspace)
+        com.nuvio.tv.core.backup.RestoreTransaction.installOrRecover(workspace)
+        com.nuvio.tv.core.backup.RestoreSyncHold.initialize(workspace)
+        super.attachBaseContext(workspace)
     }
 
     override fun onCreate() {
+        // The restart helper must not construct Hilt's account graph or open any stores.
+        if (com.nuvio.tv.core.network.WorkspaceRestartActivity.isRestartProcess(this)) return
         super.onCreate()
         com.nuvio.tv.core.contracts.HomeSectionContributorRegistry.register(iptvHomeContributor)
         analyticsConsentScope.launch { credentialMigration.migrateExistingProfiles() }

@@ -62,28 +62,41 @@ class IptvMovieMetadata @Inject constructor(
                 val provider = withTimeoutOrNull(8_000) {
                     client.vodDetails(account, item.streamId).also { if (it.isFailure) cacheable = false }.getOrNull()
                 }
-                val supplied = providerMovieMeta(base, provider)
+                var supplied = providerMovieMeta(base, provider)
                 // The TMDB switch stays authoritative: provider details are read either way, but no
                 // TMDB request is made while the user has TMDB enrichment turned off.
                 val enriched = if (!settings.enabled) null else withTimeoutOrNull(12_000) {
                     try {
-                        val indexed = index.item(account.id, MatchKind.MOVIE, item.streamId)
+                        // A panel-supplied TMDB id does not depend on the optional local index.
+                        val indexed = if (provider?.tmdbId?.takeIf { it > 0 } == null) {
+                            index.item(account.id, MatchKind.MOVIE, item.streamId)
+                        } else null
                         val year = provider?.releaseDate.orEmpty().take(4).toIntOrNull()
                             ?: provider?.releaseDateAlt.orEmpty().take(4).toIntOrNull()
                             ?: indexed?.year ?: TitleNormalizer.yearOf(item.name)
                         var tmdbId = provider?.tmdbId?.takeIf { it > 0 } ?: indexed?.tmdb?.takeIf { it > 0 }
                         if (tmdbId == null && year != null) {
-                            val query = movieLookupTitle(provider?.name ?: item.name, year)
-                            if (query.isNotBlank()) {
+                            // Panels can return an empty or differently localized name in vod_info.
+                            // Retry the catalog title only after a genuine miss, never after ambiguity.
+                            val names = listOfNotNull(provider?.name.present(), item.name.present())
+                                .distinctBy { movieLookupTitle(it, year) }
+                            for (name in names) {
+                                val query = movieLookupTitle(name, year)
+                                if (query.isBlank()) continue
                                 val response = api.searchMovies(BuildConfig.TMDB_API_KEY, query, year, settings.language)
-                                if (!response.isSuccessful) cacheable = false
                                 val body = response.body()
-                                // Don't accept a first-page match if unseen candidates might also match.
-                                if (response.isSuccessful && body != null && body.totalPages <= 1) {
-                                    tmdbId = uniqueMovieMatch(provider?.name ?: item.name, year, body.results)
+                                if (!response.isSuccessful || body == null) {
+                                    cacheable = false
+                                    break
                                 }
+                                // Don't accept a first-page match if unseen candidates might also match.
+                                if (body.totalPages > 1) break
+                                tmdbId = uniqueMovieMatch(name, year, body.results)
+                                if (tmdbId != null || body.results.isNotEmpty()) break
                             }
                         }
+                        // Keep the resolved external id for ratings without changing playback identity.
+                        supplied = supplied.copy(tmdbId = tmdbId)
                         tmdbId?.let { tmdb.fetchEnrichment(it.toString(), item.type, settings.language) }
                     } catch (e: CancellationException) {
                         throw e
@@ -154,6 +167,7 @@ internal fun providerMovieMeta(base: Meta, info: XtreamVodInfoDto?): Meta {
         imdbRating = info.rating?.toFloatOrNull()?.takeIf { it > 0 && it <= 10 } ?: base.imdbRating,
         genres = info.genre.people().ifEmpty { base.genres },
         runtime = minutes ?: base.runtime,
+        tmdbId = info.tmdbId?.takeIf { it > 0 } ?: base.tmdbId,
         director = info.director.people().ifEmpty { base.director },
         cast = cast.ifEmpty { base.cast },
         castMembers = cast.map { MetaCastMember(name = it) }.ifEmpty { base.castMembers }
@@ -162,6 +176,9 @@ internal fun providerMovieMeta(base: Meta, info: XtreamVodInfoDto?): Meta {
 
 internal fun mergeMovieEnrichment(base: Meta, enrichment: TmdbEnrichment?, settings: TmdbSettings): Meta {
     val e = enrichment ?: return base
+    val people = (e.directorMembers + e.writerMembers + e.castMembers.ifEmpty { base.castMembers })
+        .filter { it.name.isNotBlank() }
+        .distinctBy { Triple(it.tmdbId, it.name.lowercase(java.util.Locale.ROOT), it.character) }
     return base.copy(
         name = if (settings.useBasicInfo) e.localizedTitle.present() ?: e.originalTitle.present() ?: base.name else base.name,
         description = if (settings.useBasicInfo) e.description.present() ?: base.description else base.description,
@@ -179,7 +196,7 @@ internal fun mergeMovieEnrichment(base: Meta, enrichment: TmdbEnrichment?, setti
         director = if (settings.useCredits) e.director.ifEmpty { base.director } else base.director,
         writer = if (settings.useCredits) e.writer.ifEmpty { base.writer } else base.writer,
         cast = if (settings.useCredits) e.castMembers.map { it.name }.ifEmpty { base.cast } else base.cast,
-        castMembers = if (settings.useCredits) e.castMembers.ifEmpty { base.castMembers } else base.castMembers,
+        castMembers = if (settings.useCredits) people.ifEmpty { base.castMembers } else base.castMembers,
         productionCompanies = if (settings.useProductions) e.productionCompanies.ifEmpty { base.productionCompanies } else base.productionCompanies,
         networks = if (settings.useNetworks) e.networks.ifEmpty { base.networks } else base.networks,
         trailers = if (settings.useTrailers) e.trailers.ifEmpty { base.trailers } else base.trailers

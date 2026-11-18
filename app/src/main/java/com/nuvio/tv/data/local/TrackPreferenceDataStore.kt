@@ -1,6 +1,7 @@
 package com.nuvio.tv.data.local
 
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -49,7 +50,10 @@ class TrackPreferenceDataStore @Inject constructor(
     private fun pictureStore() = factory.get(profileManager.activeProfileId.value, PICTURE_FEATURE)
 
     suspend fun savePicture(contentId: String, memory: com.nuvio.tv.core.picture.PictureMemory) {
-        pictureStore().edit { prefs ->
+        pictureStore().edit { prefs -> writePicture(prefs, contentId, memory) }
+    }
+
+    private fun writePicture(prefs: MutablePreferences, contentId: String, memory: com.nuvio.tv.core.picture.PictureMemory) {
             val aspectKey = key(ASPECT_MODE, contentId)
             if (memory.aspectMode != null) prefs[aspectKey] = memory.aspectMode else prefs.remove(aspectKey)
             val zoom = memory.zoom
@@ -62,7 +66,6 @@ class TrackPreferenceDataStore @Inject constructor(
                 val k = floatKey(field, contentId)
                 if (value != null) prefs[k] = value else prefs.remove(k)
             }
-        }
     }
 
     suspend fun loadPicture(contentId: String): com.nuvio.tv.core.picture.PictureMemory? {
@@ -79,6 +82,39 @@ class TrackPreferenceDataStore @Inject constructor(
         }
         if (aspect == null && zoom == null) return null
         return com.nuvio.tv.core.picture.PictureMemory(aspectMode = aspect, zoom = zoom)
+    }
+
+    // VOD overrides are separate from channel picture memory. Applying a VOD default must
+    // override older film/series choices without erasing live-channel settings or manual zoom.
+    internal suspend fun defaultVodAspectMode(): com.nuvio.tv.core.picture.AspectMode? =
+        pictureStore().data.first()[stringPreferencesKey("vod_default_aspect_mode")]?.let { name ->
+            com.nuvio.tv.core.picture.AspectMode.entries.firstOrNull { it.name == name }
+        }
+
+    internal suspend fun loadVodPicture(contentId: String): com.nuvio.tv.core.picture.PictureMemory? {
+        val memory = loadPicture(contentId)
+        val prefs = pictureStore().data.first()
+        val aspect = prefs[key("vod_aspect_mode", contentId)]
+            ?: prefs[stringPreferencesKey("vod_default_aspect_mode")]
+            ?: memory?.aspectMode
+        return if (aspect == null && memory == null) null else
+            com.nuvio.tv.core.picture.PictureMemory(aspect, memory?.zoom)
+    }
+
+    internal suspend fun saveVodPicture(contentId: String, memory: com.nuvio.tv.core.picture.PictureMemory) {
+        pictureStore().edit { prefs ->
+            writePicture(prefs, contentId, memory)
+            val aspectKey = key("vod_aspect_mode", contentId)
+            if (memory.aspectMode != null) prefs[aspectKey] = memory.aspectMode else prefs.remove(aspectKey)
+        }
+    }
+
+    internal suspend fun applyAspectModeToAllVod(mode: com.nuvio.tv.core.picture.AspectMode) {
+        pictureStore().edit { prefs ->
+            prefs.asMap().keys.filter { it.name.startsWith("vod_aspect_mode|") }
+                .forEach { prefs.remove(stringPreferencesKey(it.name)) }
+            prefs[stringPreferencesKey("vod_default_aspect_mode")] = mode.name
+        }
     }
 
     private fun key(field: String, contentId: String) =

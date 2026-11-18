@@ -283,6 +283,7 @@ class MetaRepositoryImpl @Inject constructor(
         }
         return base.copy(
             type = com.nuvio.tv.domain.model.ContentType.SERIES,
+            tmdbId = detail.tmdbId?.takeIf { it > 0 },
             videos = videos,
             poster = enrichment?.poster ?: base.poster,
             background = enrichment?.backdrop ?: detail.backdrop,

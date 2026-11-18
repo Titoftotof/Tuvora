@@ -9,6 +9,9 @@ import com.nuvio.tv.data.remote.supabase.SupabaseProfilePinVerifyResult
 import com.nuvio.tv.domain.model.UserProfile
 import io.github.jan.supabase.postgrest.Postgrest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -33,6 +36,16 @@ class ProfileSyncService @Inject constructor(
     private val syncClientIdentity: SyncClientIdentity,
     private val portablePins: com.nuvio.tv.core.profile.PortableProfilePins
 ) {
+    private val profileListMutex = Mutex()
+
+    /** Keep creation and copying together, before publishing the resulting profile list. */
+    internal suspend fun <T> withLocalProfileMutation(block: suspend () -> T): T =
+        profileListMutex.withLock {
+            val result = block()
+            pushProfiles()
+            result
+        }
+
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
             block()
@@ -42,7 +55,9 @@ class ProfileSyncService @Inject constructor(
         }
     }
 
-    suspend fun pushToRemote(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun pushToRemote(): Result<Unit> = profileListMutex.withLock { pushProfiles() }
+
+    private suspend fun pushProfiles(): Result<Unit> = withContext(Dispatchers.IO) {
         // Profile create/update/delete works signed out (ProfileManager has already written the
         // change locally by the time we get here), so without this the RPC goes out as `anon` and
         // comes back 42501 on every profile edit. KMP twin: ProfileRepository.pushProfiles().
@@ -51,7 +66,8 @@ class ProfileSyncService @Inject constructor(
             return@withContext Result.failure(SyncNotAuthenticatedException())
         }
         try {
-            val profiles = profileManager.profiles.value
+            val snapshot = profileManager.profileSyncSnapshot()
+            val profiles = snapshot.profiles
 
             val params = buildJsonObject {
                 put("p_client_max_profiles", ProfileManager.MAX_PROFILES)
@@ -76,16 +92,21 @@ class ProfileSyncService @Inject constructor(
                 postgrest.rpc("sync_push_profiles", params)
             }
 
+            profileManager.markProfilesSynced(snapshot.revision)
             Log.d(TAG, "Pushed ${profiles.size} profiles to remote")
             Result.success(Unit)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Log.e(TAG, "Failed to push profiles to remote", e)
             Result.failure(e)
         }
     }
 
     // `force` accepted for upstream call-site compatibility; the fork always pulls (no freshness cache).
-    suspend fun pullFromRemote(force: Boolean = false): Result<List<UserProfile>> = withContext(Dispatchers.IO) {
+    suspend fun pullFromRemote(force: Boolean = false): Result<List<UserProfile>> =
+        profileListMutex.withLock { pullProfiles() }
+
+    private suspend fun pullProfiles(): Result<List<UserProfile>> = withContext(Dispatchers.IO) {
         // Without a live session this RPC goes out as `anon` and comes back
         // `42501 permission denied for function sync_pull_profiles` — one of the launch-trio
         // errors measured on the backend (report_device / get_sync_owner / sync_pull_profiles).
@@ -95,6 +116,14 @@ class ProfileSyncService @Inject constructor(
             return@withContext Result.failure(SyncNotAuthenticatedException())
         }
         try {
+            var snapshot = profileManager.profileSyncSnapshot()
+            if (snapshot.pending) {
+                // Retry local edits first, including after an offline creation or app restart.
+                // On failure, keep the pending list and never replace it with remote data.
+                pushProfiles().getOrThrow()
+                snapshot = profileManager.profileSyncSnapshot()
+                if (snapshot.pending) return@withContext Result.success(snapshot.profiles)
+            }
             val response = withJwtRefreshRetry {
                 postgrest.rpc("sync_pull_profiles")
             }
@@ -117,12 +146,16 @@ class ProfileSyncService @Inject constructor(
             }
 
             if (profiles.isNotEmpty()) {
-                profileManager.replaceAllProfiles(profiles)
+                if (!profileManager.applyRemoteProfiles(profiles, snapshot.revision)) {
+                    Log.d(TAG, "Discarded stale profiles response after a local edit")
+                    return@withContext Result.success(profileManager.profileSyncSnapshot().profiles)
+                }
                 Log.d(TAG, "Merged ${profiles.size} remote profiles into local store")
             }
 
             Result.success(profiles)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Log.e(TAG, "Failed to pull profiles from remote", e)
             Result.failure(e)
         }

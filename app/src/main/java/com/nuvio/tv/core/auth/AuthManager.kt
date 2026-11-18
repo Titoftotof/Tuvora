@@ -186,7 +186,7 @@ class AuthManager @Inject constructor(
      * KMP twin: SyncSession.canSync() in the mobile/desktop codebase.
      */
     val canSync: Boolean
-        get() = !com.nuvio.tv.core.backup.RestoreSyncHold.held && !com.nuvio.tv.core.profile.ConfigurationMutation.active && isAuthenticated && auth.currentAccessTokenOrNull() != null
+        get() = !com.nuvio.tv.core.network.BackendWorkspaceStore.switching && !com.nuvio.tv.core.backup.RestoreSyncHold.held && !com.nuvio.tv.core.profile.ConfigurationMutation.active && isAuthenticated && auth.currentAccessTokenOrNull() != null
 
     /** The current access token, or null when there is no session (used to key a server rate-limit bucket). */
     fun currentAccessToken(): String? = auth.currentAccessTokenOrNull()
@@ -231,20 +231,20 @@ class AuthManager @Inject constructor(
                     resolveAndCache()
                 } catch (retryError: Exception) {
                     if (fallbackToOwnIdOnFailure) {
-                        Log.e(TAG, "Failed to get effective user ID after refresh; falling back to own ID", retryError)
+                        Log.e(TAG, "Failed to get effective user ID after refresh; falling back to own ID")
                         userId
                     } else {
-                        Log.e(TAG, "Failed to get effective user ID after refresh", retryError)
+                        Log.e(TAG, "Failed to get effective user ID after refresh")
                         null
                     }
                 }
             }
 
             if (fallbackToOwnIdOnFailure) {
-                Log.e(TAG, "Failed to get effective user ID, falling back to own ID", e)
+                Log.e(TAG, "Failed to get effective user ID, falling back to own ID")
                 userId
             } else {
-                Log.e(TAG, "Failed to get effective user ID", e)
+                Log.e(TAG, "Failed to get effective user ID")
                 null
             }
         }
@@ -262,7 +262,7 @@ class AuthManager @Inject constructor(
             }
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "Sign up failed", e)
+            Log.e(TAG, "Sign up failed")
             Result.failure(e)
         }
     }
@@ -275,7 +275,7 @@ class AuthManager @Inject constructor(
             }
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "Sign in failed", e)
+            Log.e(TAG, "Sign in failed")
             Result.failure(e)
         }
     }
@@ -325,7 +325,7 @@ class AuthManager @Inject constructor(
             auth.signInAnonymously()
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "QR anonymous sign in failed", e)
+            Log.e(TAG, "QR anonymous sign in failed")
             Result.failure(e)
         }
     }
@@ -346,7 +346,7 @@ class AuthManager @Inject constructor(
         try {
             auth.signOut()
         } catch (e: Exception) {
-            Log.e(TAG, "Sign out failed", e)
+            Log.e(TAG, "Sign out failed")
         }
         cachedEffectiveUserId = null
         cachedEffectiveUserSourceUserId = null
@@ -359,6 +359,18 @@ class AuthManager @Inject constructor(
         if (deliberate) forgetLocalDataOwner()
     }
 
+    /** Preserve the data owner and all profile data; only the auth session is ended. */
+    suspend fun disconnectForWorkspaceSwitch() {
+        try {
+            kotlinx.coroutines.withTimeout(5000) { auth.signOut(io.github.jan.supabase.auth.SignOutScope.LOCAL) }
+        } catch (_: Exception) {
+            Log.w(TAG, "Remote sign-out not confirmed; removing local session")
+        } finally {
+            auth.sessionManager.deleteSession()
+        }
+        _authState.value = AuthState.SignedOut
+    }
+
     suspend fun resetForSyncBackendChange(): Result<Unit> {
         return runCatching {
             authSessionNoticeDataStore.markUnexpectedNuvioLogoutIfNeeded()
@@ -366,7 +378,7 @@ class AuthManager @Inject constructor(
             try {
                 auth.signOut()
             } catch (e: Exception) {
-                Log.w(TAG, "Sign out failed while resetting for sync backend change; continuing local reset", e)
+                Log.w(TAG, "Sign out failed while resetting for sync backend change; continuing local reset")
             }
             cachedEffectiveUserId = null
             cachedEffectiveUserSourceUserId = null
@@ -445,7 +457,7 @@ class AuthManager @Inject constructor(
 
     private suspend fun forgetLocalDataOwner() {
         runCatching { authSessionNoticeDataStore.clearLocalDataOwner() }
-            .onFailure { Log.w(TAG, "Failed to clear the local data owner", it) }
+            .onFailure { Log.w(TAG, "Failed to clear the local data owner") }
         _accountSwitchPrompt.value = null
     }
 
@@ -493,7 +505,7 @@ class AuthManager @Inject constructor(
         try {
             auth.signOut()
         } catch (e: Exception) {
-            Log.w(TAG, "Sign-out of the declined account failed", e)
+            Log.w(TAG, "Sign-out of the declined account failed")
         }
         cachedEffectiveUserId = null
         cachedEffectiveUserSourceUserId = null
@@ -524,7 +536,7 @@ class AuthManager @Inject constructor(
             // user really signed out. Updates preserve this app storage when package/signing stay
             // the same, and importSession restarts rotating-token auto refresh.
             val persistedSession = runCatching { auth.sessionManager.loadSession() }
-                .onFailure { error -> Log.w(TAG, "$reason; failed to read persisted session", error) }
+                .onFailure { error -> Log.w(TAG, "$reason; failed to read persisted session") }
                 .getOrNull()
             if (persistedSession?.refreshToken.isNullOrBlank()) {
                 Log.w(TAG, "$reason and no persisted refresh token is available")
@@ -536,9 +548,9 @@ class AuthManager @Inject constructor(
             } catch (restoreError: Exception) {
                 restoreError.toSessionRefreshResult().also { result ->
                     if (result == SessionRefreshResult.INVALID_SESSION) {
-                        Log.e(TAG, "Persisted Supabase session was rejected", restoreError)
+                        Log.e(TAG, "Persisted Supabase session was rejected")
                     } else {
-                        Log.w(TAG, "Persisted Supabase session could not refresh yet", restoreError)
+                        Log.w(TAG, "Persisted Supabase session could not refresh yet")
                     }
                 }
             }
@@ -596,12 +608,12 @@ class AuthManager @Inject constructor(
                         )
                     )
                 } catch (retryError: Exception) {
-                    Log.e(TAG, "Failed to start TV login session after legacy retry", retryError)
+                    Log.e(TAG, "Failed to start TV login session after legacy retry")
                     Result.failure(retryError)
                 }
             }
 
-            Log.e(TAG, "Failed to start TV login session", e)
+            Log.e(TAG, "Failed to start TV login session")
             Result.failure(e)
         }
     }
@@ -632,7 +644,7 @@ class AuthManager @Inject constructor(
                 ?: return Result.failure(Exception("Empty response from poll_tv_login_session"))
             Result.success(result)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to poll TV login session", e)
+            Log.e(TAG, "Failed to poll TV login session")
             Result.failure(e)
         }
     }
@@ -656,7 +668,7 @@ class AuthManager @Inject constructor(
                 httpClient.newCall(request).execute().use { response ->
                     val responseBody = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        throw IllegalStateException("TV login exchange failed (${response.code}): $responseBody")
+                        throw IllegalStateException("TV login exchange failed (${response.code})")
                     }
                     responseBody
                 }
@@ -665,7 +677,7 @@ class AuthManager @Inject constructor(
             auth.importAuthToken(result.accessToken, result.refreshToken)
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to exchange TV login session", e)
+            Log.e(TAG, "Failed to exchange TV login session")
             Result.failure(e)
         }
     }

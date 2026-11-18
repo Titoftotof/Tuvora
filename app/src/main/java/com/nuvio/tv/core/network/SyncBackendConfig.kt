@@ -14,7 +14,19 @@ data class SyncBackendConfig(
     val anonKey: String,
     val avatarPublicBaseUrl: String,
     val schemaVersion: Int = 1,
+    val tvLoginWebBaseUrl: String = "",
+    val allowedQrOrigins: Set<String> = emptySet(),
 ) {
+    fun acceptsQrUrl(url: String): Boolean = runCatching {
+        val uri = java.net.URI(url)
+        uri.scheme == "https" && uri.rawUserInfo == null && uri.fragment == null &&
+            allowedQrOrigins.any { origin ->
+                val trusted = java.net.URI(origin)
+                uri.host.equals(trusted.host, ignoreCase = true) &&
+                    (if (uri.port == -1) 443 else uri.port) == (if (trusted.port == -1) 443 else trusted.port)
+            }
+    }.getOrDefault(false)
+
     val normalizedSupabaseUrl: String
         get() = supabaseUrl.trim().trimEnd('/')
 
@@ -81,11 +93,22 @@ internal data class StoredSyncBackendSelection(
 )
 
 object SyncBackendDefaults {
+    // Public website client configuration; never use service_role / sb_secret keys here.
+    const val OFFICIAL_URL = "https://qsonncwknzdixurjyqap.supabase.co"
+    const val OFFICIAL_PUBLIC_KEY = "sb_publishable_WNnOu03ivQUcqVCxoREBMA_L9sgl94X"
+    const val OFFICIAL_LOGIN_URL = "https://qsonncwknzdixurjyqap.functions.supabase.co/tv-login-approve"
+
     fun hosted(): SyncBackendConfig =
         SyncBackendConfig(
             id = SYNC_BACKEND_HOSTED_ID,
-            displayName = "Hosted",
+            displayName = "Serveur personnel",
             supabaseUrl = BuildConfig.SUPABASE_URL,
+            tvLoginWebBaseUrl = BuildConfig.TV_LOGIN_WEB_BASE_URL,
+            allowedQrOrigins = setOfNotNull(runCatching {
+                val uri = java.net.URI(BuildConfig.TV_LOGIN_WEB_BASE_URL)
+                require(uri.scheme == "https" && uri.host != null)
+                "https://${uri.host}" + if (uri.port == -1) "" else ":${uri.port}"
+            }.getOrNull()),
             anonKey = BuildConfig.SUPABASE_ANON_KEY,
             avatarPublicBaseUrl = BuildConfig.AVATAR_PUBLIC_BASE_URL
                 .trim()
@@ -96,12 +119,12 @@ object SyncBackendDefaults {
     fun nuvio(): SyncBackendConfig =
         SyncBackendConfig(
             id = SYNC_BACKEND_NUVIO_ID,
-            displayName = "Tuvora",
-            supabaseUrl = BuildConfig.NUVIO_SUPABASE_URL,
-            anonKey = BuildConfig.NUVIO_SUPABASE_ANON_KEY,
-            avatarPublicBaseUrl = BuildConfig.NUVIO_AVATAR_PUBLIC_BASE_URL
-                .trim()
-                .ifBlank { "${BuildConfig.NUVIO_SUPABASE_URL.trim().trimEnd('/')}/storage/v1/object/public/avatars" },
+            displayName = "Tuvora officiel",
+            supabaseUrl = OFFICIAL_URL,
+            anonKey = OFFICIAL_PUBLIC_KEY,
+            avatarPublicBaseUrl = "$OFFICIAL_URL/storage/v1/object/public/avatars",
+            tvLoginWebBaseUrl = OFFICIAL_LOGIN_URL,
+            allowedQrOrigins = setOf("https://qsonncwknzdixurjyqap.functions.supabase.co", "https://tuvora.co"),
             schemaVersion = 1,
         ).normalized()
 
@@ -129,7 +152,15 @@ internal fun SyncBackendManifest.backendConfigForActiveBackend(): SyncBackendCon
 
 internal fun SyncBackendConfig.isUsableClientConfig(): Boolean =
     id in setOf(SYNC_BACKEND_HOSTED_ID, SYNC_BACKEND_NUVIO_ID) &&
-        normalizedSupabaseUrl.startsWith("https://") &&
+        isHttpsEndpoint(normalizedSupabaseUrl) &&
         anonKey.isNotBlank() &&
         !anonKey.startsWith("<") &&
-        normalizedAvatarPublicBaseUrl.startsWith("https://")
+        !anonKey.startsWith("sb_secret_") &&
+        isHttpsEndpoint(normalizedAvatarPublicBaseUrl) &&
+        isHttpsEndpoint(tvLoginWebBaseUrl) && acceptsQrUrl(tvLoginWebBaseUrl)
+
+private fun isHttpsEndpoint(url: String): Boolean = runCatching {
+    val uri = java.net.URI(url)
+    uri.scheme == "https" && !uri.host.isNullOrBlank() &&
+        uri.rawUserInfo == null && uri.fragment == null
+}.getOrDefault(false)

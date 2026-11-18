@@ -205,30 +205,27 @@ class ProfileSelectionViewModel @Inject constructor(
         viewModelScope.launch {
             _isCreating.value = true
             val result = try {
-                val profile = profileManager.createProfile(
-                    name = name,
-                    avatarColorHex = avatarColorHex,
-                    avatarId = avatarId
-                )
-                if (profile != null) {
-                    val copyResult = copyFromProfileId?.let { sourceProfileId ->
-                        profileSettingsSyncService.copyProfileSetup(
-                            sourceProfileId = sourceProfileId,
-                            targetProfileId = profile.id,
-                            options = options
-                        )
-                    }
-                    if (copyResult?.isFailure == true) {
-                        profileManager.deleteProfile(profile.id)
-                        CreateProfileResult.Failed
-                    } else {
-                        profileSyncService.pushToRemote()
-                        refreshProfilePinStates()
+                profileSyncService.withLocalProfileMutation {
+                    val profile = profileManager.createProfile(
+                        name = name,
+                        avatarColorHex = avatarColorHex,
+                        avatarId = avatarId
+                    )
+                    if (profile != null) {
+                        val copyResult = copyFromProfileId?.let { sourceProfileId ->
+                            profileSettingsSyncService.copyProfileSetup(
+                                sourceProfileId = sourceProfileId,
+                                targetProfileId = profile.id,
+                                options = options
+                            )
+                        }
+                        // The copy rolls its own data back on failure. Keep the saved profile
+                        // and let the existing UI report that its settings could not be copied.
                         CreateProfileResult.Created(profile, copyResult)
+                    } else {
+                        CreateProfileResult.Failed
                     }
-                } else {
-                    CreateProfileResult.Failed
-                }
+                }.also { refreshProfilePinStates() }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {

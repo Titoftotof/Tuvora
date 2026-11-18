@@ -363,12 +363,12 @@ open class MainActivity : ComponentActivity() {
             Locale.setDefault(locale)
             val config = Configuration(newBase.resources.configuration)
             config.setLocale(locale)
-            super.attachBaseContext(newBase.createConfigurationContext(config))
+            super.attachBaseContext(com.nuvio.tv.core.network.BackendWorkspaceStore.wrap(newBase.createConfigurationContext(config)))
         } else {
             // Cache not ready yet (very early cold start) — use system locale
             // The IO coroutine in Application.onCreate will finish before any activity
             // is usually created, but if not, we just use system locale until next launch
-            super.attachBaseContext(newBase)
+            super.attachBaseContext(com.nuvio.tv.core.network.BackendWorkspaceStore.wrap(newBase))
         }
     }
 

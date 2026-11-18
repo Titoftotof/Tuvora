@@ -624,9 +624,10 @@ class HomeViewModel @Inject constructor(
                 .distinctUntilChanged()
                 .collectLatest { settings ->
                     currentMdbListSettings = settings
+                    mdbBatchNegativeIds.clear()
                     _uiState.update {
                         it.copy(
-                            mdbListShowOnHero = settings.showOnHero,
+                            mdbListShowOnHero = settings.enabled && settings.showOnHero,
                             mdbListRatingOrder = settings.enabledRatingOrder()
                         )
                     }

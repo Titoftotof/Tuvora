@@ -1074,7 +1074,7 @@ fun PlayerRuntimeController.scheduleHideControls() {
         if (_uiState.value.isPlaying && !_uiState.value.showAudioOverlay &&
             !_uiState.value.showSubtitleOverlay && !_uiState.value.showSubtitleStylePanel &&
             !_uiState.value.showSpeedDialog && !_uiState.value.showMoreDialog &&
-            !_uiState.value.showVideoZoomPanel &&
+            !_uiState.value.showVideoZoomPanel && !_uiState.value.showAspectModeDialog &&
             !_uiState.value.showSubtitleDelayOverlay &&
             !_uiState.value.showSubtitleTimingDialog &&
             !_uiState.value.showEpisodesPanel && !_uiState.value.showSourcesPanel &&
@@ -1095,7 +1095,8 @@ internal fun PlayerRuntimeController.showSubtitleDelayOverlay() {
             showSubtitleOverlay = false,
             showSubtitleStylePanel = false,
             showSubtitleTimingDialog = false,
-            showSpeedDialog = false
+            showSpeedDialog = false,
+            showAspectModeDialog = false
         )
     }
     scheduleHideSubtitleDelayOverlay()
@@ -1178,7 +1179,7 @@ internal fun PlayerRuntimeController.schedulePauseOverlay() {
         val anyPanelOpen = s.showSubtitleOverlay || s.showSubtitleStylePanel ||
             s.showSpeedDialog || s.showMoreDialog || s.showEpisodesPanel ||
             s.showSourcesPanel || s.showAudioOverlay || s.showStreamInfoOverlay ||
-            s.showSubtitleTimingDialog || s.showSubtitleDelayOverlay || s.showVideoZoomPanel ||
+            s.showSubtitleTimingDialog || s.showSubtitleDelayOverlay || s.showVideoZoomPanel || s.showAspectModeDialog ||
             s.showPartyPanel
         if (!s.isPlaying && s.pauseOverlayEnabled && s.error == null && !anyPanelOpen) {
             _uiState.update { it.copy(showPauseOverlay = true, showControls = false) }
@@ -1482,6 +1483,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                 it.copy(
                     playbackSpeed = event.speed,
                     showSpeedDialog = false,
+                    showAspectModeDialog = false,
                     showSubtitleTimingDialog = false,
                     showSubtitleDelayOverlay = false
                 )
@@ -1618,6 +1620,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                     showSubtitleTimingDialog = false,
                     showSubtitleDelayOverlay = false,
                     showSpeedDialog = false,
+                    showAspectModeDialog = false,
                     showControls = true
                 )
             }
@@ -1687,6 +1690,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                     showSubtitleStylePanel = false,
                     showSubtitleTimingDialog = false,
                     showSpeedDialog = false,
+                    showAspectModeDialog = false,
                     showSubtitleDelayOverlay = false,
                     showMoreDialog = false
                 )
@@ -1834,6 +1838,10 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
                 playerSettingsDataStore.setSubtitleBackgroundColor(defaults.backgroundColor)
             }
         }
+        PlayerEvent.OnShowAspectModeDialog,
+        PlayerEvent.OnDismissAspectModeDialog,
+        is PlayerEvent.OnSelectAspectMode,
+        PlayerEvent.OnApplyAspectModeToAll -> handleAspectModeEvent(event)
         PlayerEvent.OnToggleAspectRatio -> {
             val state = _uiState.value
             if (state.tunnelingEnabled) {

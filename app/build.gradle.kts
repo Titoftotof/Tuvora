@@ -12,6 +12,7 @@ plugins {
 
 import com.android.build.gradle.internal.tasks.CompileArtProfileTask
 import com.android.build.gradle.internal.tasks.L8DexDesugarLibTask
+import com.posthog.android.PostHogUploadProguardMappingsTask
 import java.io.File
 import java.security.MessageDigest
 import java.util.Properties
@@ -130,6 +131,15 @@ val sentryOrg = providers.environmentVariable("SENTRY_ORG").orNull?.trim()?.take
 val sentryProject = providers.environmentVariable("SENTRY_PROJECT").orNull?.trim()?.takeIf { it.isNotBlank() }
     ?: resolveProperty(devProperties, localProperties, "SENTRY_PROJECT").takeIf { it.isNotBlank() }
 val sentryMappingUploadEnabled = sentryAuthToken != null && sentryOrg != null && sentryProject != null
+// PostHog's Gradle plugin unconditionally registers uploadPostHogProguardMappings<Variant> and hooks it
+// onto assemble/install/bundle. That task shells out to `posthog-cli`, so a local release build without
+// the CLI installed dies at the very end ("A problem occurred starting process 'command 'posthog-cli''")
+// after ~20 minutes of R8. Gate it exactly like Sentry: only upload when the CLI credentials are present.
+// release.yml installs @posthog/cli and exports these, so CI keeps uploading mappings.
+// The CLI inherits process environment, not local.properties. Use the same source for
+// deciding to upload as for authenticating the child process.
+val postHogUploadEnabled = providers.environmentVariable("POSTHOG_CLI_API_KEY").orNull
+    ?.trim()?.takeIf { it.isNotBlank() } != null
 
 fun env(name: String): String? = providers.environmentVariable(name).orNull
 
@@ -180,8 +190,8 @@ android {
             abiFilters.clear()
             abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
         }
-        versionCode = providers.gradleProperty("versionCodeOverride").orNull?.toIntOrNull() ?: 1070
-        versionName = providers.gradleProperty("versionNameOverride").orNull?.takeIf { it.isNotBlank() } ?: "1.1.0-beta.7"
+        versionCode = providers.gradleProperty("versionCodeOverride").orNull?.toIntOrNull() ?: 1164
+        versionName = providers.gradleProperty("versionNameOverride").orNull?.takeIf { it.isNotBlank() } ?: "1.16.4"
 
         buildConfigField("String", "PARENTAL_GUIDE_API_URL", "\"${localProperties.getProperty("PARENTAL_GUIDE_API_URL", "")}\"")
         buildConfigField("String", "INTRODB_API_URL", "\"${localProperties.getProperty("INTRODB_API_URL", "")}\"")
@@ -609,6 +619,18 @@ tasks.configureEach {
         n.endsWith("Release") // e.g. assembleFullRelease, bundleFullRelease, assemblePlaystoreRelease
     if (isReleasePackaging) {
         dependsOn(verifyPlaybackEngineArtifacts, verifyMedia3RuntimeConvergence)
+    }
+}
+
+// Skip only the CLI upload; postHogGenerateMapIdTask/injectPostHogMetaPropertiesIntoAssets still run so
+// the map id baked into the APK stays correct for builds whose mappings we never upload.
+tasks.withType<PostHogUploadProguardMappingsTask>().configureEach {
+    onlyIf {
+        val enabled = postHogUploadEnabled
+        if (!enabled) logger.lifecycle(
+            "[PostHog] Skipping ${name}: POSTHOG_CLI_API_KEY is not set (no proguard mapping upload)."
+        )
+        enabled
     }
 }
 

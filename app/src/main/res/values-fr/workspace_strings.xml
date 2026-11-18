@@ -1,0 +1,10 @@
+<resources>
+    <string name="workspace_title">Serveur de synchronisation</string>
+    <string name="workspace_official">Tuvora officiel</string>
+    <string name="workspace_personal">Serveur personnel</string>
+    <string name="workspace_separate">Les comptes et les données sont séparés entre les deux serveurs.</string>
+    <string name="workspace_credentials_notice">La synchronisation transmet les identifiants des playlists au serveur choisi. Elle n’est pas chiffrée de bout en bout.</string>
+    <string name="workspace_confirm_title">Changer de serveur ?</string>
+    <string name="workspace_confirm_message">Vos données actuelles resteront sur cet appareil dans leur espace. L’application redémarrera et vous devrez vous connecter au serveur choisi. Aucune playlist ne sera transférée.</string>
+    <string name="workspace_switching">Changement de serveur…</string>
+</resources>

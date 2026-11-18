@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="profile_copy_addons_shared">Pour copier les addons, désactivez d’abord le partage des addons du profil principal sur ce profil.</string>
+    <string name="profile_copy_addons">Addons (remplacer la liste et sa configuration)</string>
     <string name="profile_copy_iptv">Connexions et catégories IPTV</string>
     <string name="profile_copy_other_connections">Connexions aux autres fournisseurs</string>
     <string name="profile_copy_preferences">Apparence, lecture et accueil</string>
     <string name="profile_copy_favorites">Favoris et listes locales</string>
     <string name="profile_copy_history">Historique et progression locale</string>
     <string name="profile_copy_exclusions_v2">Le nom, l’avatar, le PIN et la session du compte principal ne sont pas copiés. Les rubriques cochées ci-dessus seront copiées indépendamment.</string>
+    <string name="player_aspect_apply_all">Appliquer à tous les films et séries</string>
+    <string name="player_aspect_tunneling_modes">Seuls les modes ajusté et étiré sont disponibles avec le tunneling.</string>
 </resources>

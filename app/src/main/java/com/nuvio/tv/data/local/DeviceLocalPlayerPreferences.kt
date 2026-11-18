@@ -35,7 +35,7 @@ class DeviceLocalPlayerPreferences @Inject constructor(
             androidx.datastore.preferences.core.emptyPreferences()
         }
     ) {
-        context.preferencesDataStoreFile("device_local_player_prefs")
+        java.io.File(com.nuvio.tv.core.network.BackendWorkspaceStore.deviceContext(context).filesDir, "datastore/device_local_player_prefs.preferences_pb")
     }
 
     private val aspectModeKey = stringPreferencesKey("aspect_mode")

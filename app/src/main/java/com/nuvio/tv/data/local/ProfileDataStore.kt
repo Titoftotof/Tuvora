@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.emptyPreferences
@@ -29,14 +31,26 @@ private val Context.profileDataStore: DataStore<Preferences> by preferencesDataS
     }
 )
 
+internal data class ProfileSyncSnapshot(
+    val profiles: List<UserProfile>,
+    val revision: Long,
+    val pending: Boolean
+)
+
 @Singleton
-class ProfileDataStore @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val moshi: Moshi
+class ProfileDataStore internal constructor(
+    private val context: Context,
+    private val moshi: Moshi,
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore = SnapshotGatedDataStore(context.profileDataStore)
+    @Inject constructor(
+        @ApplicationContext context: Context,
+        moshi: Moshi
+    ) : this(context, moshi, SnapshotGatedDataStore(context.profileDataStore))
 
     private val profilesJsonKey = stringPreferencesKey("profiles_json")
+    private val profilesRevisionKey = longPreferencesKey("profiles_local_revision")
+    private val profilesPendingKey = booleanPreferencesKey("profiles_pending_sync")
     private val activeProfileIdKey = intPreferencesKey("active_profile_id")
     private val hasEverSelectedProfileKey = booleanPreferencesKey("profile_has_ever_selected")
     private val rememberLastProfileEnabledKey = booleanPreferencesKey("remember_last_profile_enabled")
@@ -109,6 +123,7 @@ class ProfileDataStore @Inject constructor(
                 current.add(profile)
             }
             prefs[profilesJsonKey] = serializeProfiles(current)
+            markLocalChange(prefs)
         }
     }
 
@@ -118,6 +133,7 @@ class ProfileDataStore @Inject constructor(
             val current = parseProfiles(prefs[profilesJsonKey]).toMutableList()
             current.removeAll { it.id == id }
             prefs[profilesJsonKey] = serializeProfiles(current)
+            markLocalChange(prefs)
             if ((prefs[activeProfileIdKey] ?: 1) == id) {
                 prefs[activeProfileIdKey] = 1
             }
@@ -128,11 +144,47 @@ class ProfileDataStore @Inject constructor(
         dataStore.edit { prefs ->
             val normalizedProfiles = normalizeProfiles(profiles)
             prefs[profilesJsonKey] = serializeProfiles(normalizedProfiles)
+            markLocalChange(prefs)
             val activeId = prefs[activeProfileIdKey] ?: 1
             if (normalizedProfiles.none { it.id == activeId }) {
                 prefs[activeProfileIdKey] = 1
             }
         }
+    }
+
+    private fun markLocalChange(prefs: MutablePreferences) {
+        prefs[profilesRevisionKey] = (prefs[profilesRevisionKey] ?: 0L) + 1L
+        prefs[profilesPendingKey] = true
+    }
+
+    internal suspend fun profileSyncSnapshot(): ProfileSyncSnapshot {
+        val prefs = dataStore.data.first()
+        return ProfileSyncSnapshot(
+            parseProfiles(prefs[profilesJsonKey]),
+            prefs[profilesRevisionKey] ?: 0L,
+            prefs[profilesPendingKey] ?: false
+        )
+    }
+
+    internal suspend fun markProfilesSynced(revision: Long) {
+        dataStore.edit { prefs ->
+            // A second edit may have happened while the upload was in flight.
+            if ((prefs[profilesRevisionKey] ?: 0L) == revision) prefs[profilesPendingKey] = false
+        }
+    }
+
+    /** Atomically reject a response fetched before a local edit, even if that edit is now uploaded. */
+    internal suspend fun replaceProfilesFromRemote(profiles: List<UserProfile>, revision: Long): Set<Int>? {
+        var previousIds: Set<Int>? = null
+        dataStore.edit { prefs ->
+            if (prefs[profilesPendingKey] == true || (prefs[profilesRevisionKey] ?: 0L) != revision) return@edit
+            previousIds = parseProfiles(prefs[profilesJsonKey]).map { it.id }.toSet()
+            val normalized = normalizeProfiles(profiles)
+            prefs[profilesJsonKey] = serializeProfiles(normalized)
+            prefs[profilesRevisionKey] = revision + 1L
+            if (normalized.none { it.id == (prefs[activeProfileIdKey] ?: 1) }) prefs[activeProfileIdKey] = 1
+        }
+        return previousIds
     }
 
     internal suspend fun backupSnapshot(): Preferences {

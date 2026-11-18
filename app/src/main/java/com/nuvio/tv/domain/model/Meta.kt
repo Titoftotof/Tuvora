@@ -45,7 +45,9 @@ data class Meta(
     val hasLandscapePoster: Boolean? = null,
     val hasLogo: Boolean? = null,
     val hasLinks: Boolean? = null,
-    val hasVideos: Boolean? = null
+    val hasVideos: Boolean? = null,
+    // External metadata identity; playback continues to use id.
+    val tmdbId: Int? = null
 ) {
     val apiType: String
         get() = type.toApiString(rawType)

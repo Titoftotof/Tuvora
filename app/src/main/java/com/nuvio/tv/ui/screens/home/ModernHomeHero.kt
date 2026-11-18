@@ -642,7 +642,7 @@ private fun HeroTitleContent(
                     }
                 }
                 // MDBList ratings inline after other secondary meta.
-                if (showImdbRatings && hasMdbListRatings) {
+                if (hasMdbListRatings) {
                     // Divider before MDBList ratings is already handled by the
                     // badge/IMDb/details divider logic above — only add one
                     // when IMDb or details were the last visible element.

@@ -135,6 +135,7 @@ class MetaPreviewEnricher @Inject constructor(
         runtime = runtime, director = director,
         cast = emptyList(), videos = emptyList(),
         country = country, awards = null,
-        language = language, links = links
+        language = language, links = links,
+        imdbId = imdbId, tmdbId = tmdbId
     )
 }

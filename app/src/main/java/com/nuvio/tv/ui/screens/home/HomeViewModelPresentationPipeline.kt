@@ -652,6 +652,14 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
                 if (profileManager.activeProfileId.value == focusProfileId &&
                     pendingTmdbEnrichItemId == item.id && outcome is ExternalMetaOutcome.Resolved) {
                     updateCatalogItemWithMeta(item.id, outcome.meta)
+                    if (mdbListRepository.isAvailable(currentMdbListSettings) && currentMdbListSettings.showOnHero) {
+                        val ratings = mdbListRepository.getRatingsForMeta(outcome.meta, item.id, item.apiType)
+                        if (ratings != null && profileManager.activeProfileId.value == focusProfileId &&
+                            pendingTmdbEnrichItemId == item.id &&
+                            mdbListRepository.isAvailable(currentMdbListSettings) && currentMdbListSettings.showOnHero) {
+                            updateCatalogItemMdbListRatings(item.id, ratings.ratings)
+                        }
+                    }
                 }
                 return@launch
             }
@@ -1040,6 +1048,8 @@ private fun HomeViewModel.updateCatalogItemWithMeta(itemId: String, meta: Meta) 
         ageRating = meta.ageRating ?: currentItem.ageRating,
         language = meta.language ?: currentItem.language,
         country = meta.country ?: currentItem.country,
+        imdbId = meta.imdbId ?: currentItem.imdbId,
+        tmdbId = meta.tmdbId ?: currentItem.tmdbId,
         seasonCount = seasonCount ?: currentItem.seasonCount,
         trailerYtIds = if (incomingTrailerYtIds.isNotEmpty()) incomingTrailerYtIds else currentItem.trailerYtIds
     )

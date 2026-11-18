@@ -138,7 +138,12 @@ class ConfigurationBackupService @Inject constructor(
                     RestoreTransaction.durableWrite(safetyFile, emergency)
                     safety = true
                     // Authentication and validation finish before any replacement is scheduled.
-                    RestoreTransaction.prepare(context, manifest)
+                    com.nuvio.tv.core.profile.ConfigurationMutation.begin()
+                    try {
+                        RestoreTransaction.prepare(context, manifest)
+                    } finally {
+                        com.nuvio.tv.core.profile.ConfigurationMutation.end()
+                    }
                     RestoreService.RestoreOutcome.Success
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { RestoreService.RestoreOutcome.Failed(e, safety) }

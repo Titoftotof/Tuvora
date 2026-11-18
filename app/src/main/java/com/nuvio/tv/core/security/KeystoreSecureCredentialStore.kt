@@ -102,21 +102,25 @@ class KeystoreSecureCredentialStore internal constructor(
     private fun encrypt(plaintext: String, profileId: Int, service: String, ref: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-        cipher.updateAAD(aad(profileId, service, ref))
+        val workspace = com.nuvio.tv.core.network.BackendWorkspaceStore.workspaceFor(context)
+        cipher.updateAAD(aad(profileId, service, ref) + (workspace?.identity.orEmpty()).toByteArray(Charsets.UTF_8))
         val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
         val nonce = cipher.iv
-        return "$FORMAT_VERSION$SEPARATOR${b64(nonce)}$SEPARATOR${b64(ciphertext)}"
+        return "${if (workspace == null) FORMAT_VERSION else "v2"}$SEPARATOR${b64(nonce)}$SEPARATOR${b64(ciphertext)}"
     }
 
     private fun decrypt(stored: String, profileId: Int, service: String, ref: String): String {
         val parts = stored.split(SEPARATOR, limit = 3)
-        require(parts.size == 3 && parts[0] == FORMAT_VERSION) { "Unknown credential format: ${parts.getOrNull(0)}" }
+        require(parts.size == 3 && parts[0] in setOf(FORMAT_VERSION, "v2")) { "Unknown credential format: ${parts.getOrNull(0)}" }
         val nonce = b64d(parts[1])
         val ciphertext = b64d(parts[2])
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         require(nonce.size == 12) { "Invalid credential nonce" }
         cipher.init(Cipher.DECRYPT_MODE, secretKey(create = false), GCMParameterSpec(GCM_TAG_BITS, nonce))
-        cipher.updateAAD(aad(profileId, service, ref))
+        val workspace = com.nuvio.tv.core.network.BackendWorkspaceStore.workspaceFor(context)
+        require(parts[0] != FORMAT_VERSION || workspace == null || workspace.legacy) { "Legacy secret belongs to personal workspace" }
+        val namespace = if (parts[0] == "v2") checkNotNull(workspace).identity else ""
+        cipher.updateAAD(aad(profileId, service, ref) + namespace.toByteArray(Charsets.UTF_8))
         return cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
     }
 
@@ -140,7 +144,12 @@ class KeystoreSecureCredentialStore internal constructor(
             try {
                 val stored = prefs(service).getString(storageKey(profileId, ref), null)
                     ?: return@withContext SecureCredentialStore.ReadResult.NotFound
-                SecureCredentialStore.ReadResult.Success(decrypt(stored, profileId, service, ref))
+                val value = decrypt(stored, profileId, service, ref)
+                if (stored.startsWith("v1.") && com.nuvio.tv.core.network.BackendWorkspaceStore.workspaceFor(context) != null) {
+                    check(prefs(service).edit().putString(storageKey(profileId, ref),
+                        encrypt(value, profileId, service, ref)).commit()) { "Unable to migrate credential" }
+                }
+                SecureCredentialStore.ReadResult.Success(value)
             } catch (e: Exception) {
                 if (isKeyUnavailable(e)) {
                     Log.w(TAG, "Credential key unavailable")
@@ -214,18 +223,13 @@ class KeystoreSecureCredentialStore internal constructor(
 
     /** All SharedPreferences files matching the `secure_credentials_*` naming convention. */
     private fun credentialPrefsFiles(): List<SharedPreferences> {
-        val dir = context.filesDir?.parentFile?.resolve("shared_prefs") ?: return emptyList()
-        return (dir.list() ?: emptyArray())
-            .filter { it.startsWith(PREFS_PREFIX) && it.endsWith(".xml") }
-            .map { context.getSharedPreferences(it.removeSuffix(".xml"), Context.MODE_PRIVATE) }
+        return com.nuvio.tv.core.network.BackendWorkspaceStore.credentialPreferences(context, PREFS_PREFIX)
+            .map { context.getSharedPreferences(it, Context.MODE_PRIVATE) }
     }
 
     private fun credentialPrefsFilesWithService(): List<Pair<String, SharedPreferences>> {
-        val dir = context.filesDir?.parentFile?.resolve("shared_prefs") ?: return emptyList()
-        return (dir.list() ?: emptyArray())
-            .filter { it.startsWith(PREFS_PREFIX) && it.endsWith(".xml") }
-            .map { fileName ->
-                val prefsName = fileName.removeSuffix(".xml")
+        return com.nuvio.tv.core.network.BackendWorkspaceStore.credentialPreferences(context, PREFS_PREFIX)
+            .map { prefsName ->
                 val service = prefsName.removePrefix(PREFS_PREFIX)
                 service to context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             }

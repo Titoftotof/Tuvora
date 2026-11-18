@@ -10,6 +10,7 @@ import com.nuvio.tv.core.picture.aspectModeAppliedToExoSurface
 import com.nuvio.tv.core.picture.VideoZoom
 import com.nuvio.tv.core.picture.SubtitleSideMargin
 import com.nuvio.tv.ui.components.player.VideoZoomDialog
+import com.nuvio.tv.ui.components.player.AspectModePickerDialog
 import com.nuvio.tv.ui.theme.NuvioMotion
 
 import com.nuvio.tv.ui.theme.NuvioTheme
@@ -490,6 +491,7 @@ fun PlayerScreen(
         uiState.showAudioOverlay,
         uiState.showSubtitleOverlay,
         uiState.showSpeedDialog,
+        uiState.showAspectModeDialog,
         shouldConfirmNextEpisodeOnEnd,
     ) {
         if (shouldConfirmNextEpisodeOnEnd) return@LaunchedEffect
@@ -497,7 +499,7 @@ fun PlayerScreen(
             !uiState.showAudioOverlay && !uiState.showSubtitleOverlay &&
             !uiState.showSubtitleStylePanel && !uiState.showSubtitleDelayOverlay &&
             !uiState.showSubtitleTimingDialog &&
-            !uiState.showSpeedDialog
+            !uiState.showSpeedDialog && !uiState.showAspectModeDialog
         ) {
             // Wait for AnimatedVisibility animation to complete before focusing play/pause button
             kotlinx.coroutines.delay(250)
@@ -579,7 +581,7 @@ fun PlayerScreen(
                     !uiState.showSubtitleOverlay &&
                     !uiState.showSubtitleStylePanel &&
                     !uiState.showSubtitleTimingDialog &&
-                    !uiState.showSpeedDialog
+                    !uiState.showSpeedDialog && !uiState.showAspectModeDialog
                 ) {
                     viewModel.onEvent(PlayerEvent.OnShowSubtitleOverlay)
                 }
@@ -653,7 +655,7 @@ fun PlayerScreen(
                 val panelOrDialogOpen = uiState.showEpisodesPanel || uiState.showSourcesPanel ||
                         isPartyPanelOpen ||
                         uiState.showAudioOverlay || uiState.showSubtitleOverlay ||
-                        uiState.showSubtitleStylePanel || uiState.showSpeedDialog ||
+                        uiState.showSubtitleStylePanel || uiState.showSpeedDialog || uiState.showAspectModeDialog ||
                         uiState.showSubtitleDelayOverlay || uiState.showSubtitleTimingDialog ||
                         uiState.showMoreDialog ||
                         shouldConfirmNextEpisodeOnEnd ||
@@ -1018,7 +1020,7 @@ fun PlayerScreen(
                     !uiState.showSubtitleStylePanel &&
                     !uiState.showSubtitleDelayOverlay &&
                     !uiState.showSubtitleTimingDialog &&
-                    !uiState.showSpeedDialog &&
+                    !uiState.showSpeedDialog && !uiState.showAspectModeDialog &&
                     !uiState.showMoreDialog
             },
             controlsVisible = uiState.showControls,
@@ -1066,7 +1068,7 @@ fun PlayerScreen(
             !uiState.showAudioOverlay &&
             !uiState.showSubtitleOverlay &&
             !uiState.showSubtitleStylePanel &&
-            !uiState.showSpeedDialog &&
+            !uiState.showSpeedDialog && !uiState.showAspectModeDialog &&
             !uiState.showMoreDialog &&
             !uiState.showDisplayModeInfo
 
@@ -1097,7 +1099,7 @@ fun PlayerScreen(
                 !uiState.showPartyPanel &&
                 !uiState.showAudioOverlay &&
                 !uiState.showSubtitleOverlay &&
-                !uiState.showSpeedDialog &&
+                !uiState.showSpeedDialog && !uiState.showAspectModeDialog &&
                 uiState.postPlayMode !is PostPlayMode.StillWatching,
             enter = fadeIn(animationSpec = tween(200)),
             exit = fadeOut(animationSpec = tween(200))
@@ -1132,8 +1134,7 @@ fun PlayerScreen(
                 onShowSubtitleDialog = { viewModel.onEvent(PlayerEvent.OnShowSubtitleOverlay) },
                 onShowSpeedDialog = { viewModel.onEvent(PlayerEvent.OnShowSpeedDialog) },
                 onToggleAspectRatio = {
-                    Log.d("PlayerScreen", "onToggleAspectRatio called - dispatching event")
-                    viewModel.onEvent(PlayerEvent.OnToggleAspectRatio)
+                    viewModel.onEvent(PlayerEvent.OnShowAspectModeDialog)
                 },
                 onShowVideoZoom = { viewModel.onEvent(PlayerEvent.OnShowVideoZoomPanel) },
                 onSwitchPlayerEngine = { viewModel.onEvent(PlayerEvent.OnSwitchInternalPlayerEngine) },
@@ -1252,7 +1253,7 @@ fun PlayerScreen(
                 !uiState.showAudioOverlay &&
                 !uiState.showSubtitleOverlay &&
                 !uiState.showSubtitleTimingDialog &&
-                !uiState.showSpeedDialog,
+                !uiState.showSpeedDialog && !uiState.showAspectModeDialog,
             enter = fadeIn(animationSpec = tween(120)),
             exit = fadeOut(animationSpec = tween(120)),
             modifier = Modifier
@@ -1540,7 +1541,7 @@ fun PlayerScreen(
                 !uiState.showSubtitleOverlay &&
                 !uiState.showSubtitleStylePanel &&
                 !uiState.showSubtitleDelayOverlay &&
-                !uiState.showSpeedDialog &&
+                !uiState.showSpeedDialog && !uiState.showAspectModeDialog &&
                 !uiState.showMoreDialog,
             onDismiss = { viewModel.onEvent(PlayerEvent.OnDismissSubtitleTimingDialog) },
             modifier = Modifier
@@ -1565,7 +1566,19 @@ fun PlayerScreen(
             )
         }
 
-        if (uiState.showVideoZoomPanel) {
+        if (uiState.showAspectModeDialog) {
+        AspectModePickerDialog(
+            currentMode = if (uiState.tunnelingEnabled) {
+                if (uiState.tunneledSurfaceFill) AspectMode.STRETCH else AspectMode.ORIGINAL
+            } else uiState.aspectMode,
+            tunnelingEnabled = uiState.tunnelingEnabled,
+            onSelectMode = { viewModel.onEvent(PlayerEvent.OnSelectAspectMode(it)) },
+            onApplyToAll = { viewModel.onEvent(PlayerEvent.OnApplyAspectModeToAll) },
+            onDismiss = { viewModel.onEvent(PlayerEvent.OnDismissAspectModeDialog) }
+        )
+    }
+
+    if (uiState.showVideoZoomPanel) {
             VideoZoomDialog(
                 zoom = uiState.videoZoom,
                 onAdjust = { axis, steps -> viewModel.onEvent(PlayerEvent.OnAdjustVideoZoom(axis, steps)) },

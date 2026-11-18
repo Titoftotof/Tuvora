@@ -733,7 +733,8 @@ internal fun SettingsToggleRow(
     enabled: Boolean = true,
     titleTrailingIcon: ImageVector? = null,
     titleTrailingIconTint: Color = NuvioTheme.colors.TextPrimary,
-    expandSubtitleOnFocus: Boolean = false
+    expandSubtitleOnFocus: Boolean = false,
+    focusableWhenDisabled: Boolean = false
 ) {
     val contentAlpha = if (enabled) 1f else 0.4f
     var isFocused by remember { mutableStateOf(false) }
@@ -745,7 +746,7 @@ internal fun SettingsToggleRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 62.dp)
-            .focusProperties { canFocus = enabled }
+            .focusProperties { canFocus = enabled || focusableWhenDisabled }
             .semantics {
                 if (!enabled) disabled()
                 role = Role.Switch
@@ -825,7 +826,8 @@ internal fun SettingsActionRow(
     leadingIcon: ImageVector? = null,
     @RawRes leadingRawIconRes: Int? = null,
     leadingArtworkSize: Dp = NuvioTheme.spacing.xl,
-    valueColor: Color = NuvioTheme.colors.TextSecondary
+    valueColor: Color = NuvioTheme.colors.TextSecondary,
+    focusableWhenDisabled: Boolean = false
 ) {
     val contentAlpha = if (enabled) 1f else 0.4f
     var isFocused by remember { mutableStateOf(false) }
@@ -835,7 +837,7 @@ internal fun SettingsActionRow(
         modifier = modifier
             .padding(top = NuvioTheme.spacing.xxs, bottom = NuvioTheme.spacing.xxs)
             .fillMaxWidth()
-            .focusProperties { canFocus = enabled }
+            .focusProperties { canFocus = enabled || focusableWhenDisabled }
             .semantics {
                 if (!enabled) disabled()
                 role = Role.Button

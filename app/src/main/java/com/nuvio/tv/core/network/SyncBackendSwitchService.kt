@@ -1,59 +1,55 @@
 package com.nuvio.tv.core.network
 
-import android.util.Log
+import android.content.Context
 import com.nuvio.tv.core.auth.AuthManager
-import com.nuvio.tv.data.remote.supabase.AvatarRepository
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
-private const val SYNC_BACKEND_SWITCH_TAG = "SyncBackendSwitch"
-
+/**
+ * Switch only at a process boundary. No client or DataStore is ever retargeted in a live process:
+ * outstanding responses remain bound to the outgoing backend and its files.
+ */
 @Singleton
 class SyncBackendSwitchService @Inject constructor(
     private val syncBackendRepository: SyncBackendRepository,
-    private val supabaseProvider: SyncBackendSupabaseProvider,
     private val authManager: AuthManager,
-    private val avatarRepository: AvatarRepository,
+    @ApplicationContext private val context: Context,
 ) {
-    private val refreshMutex = Mutex()
+    private val mutex = Mutex()
 
-    suspend fun refreshSelection() = refreshMutex.withLock {
-        syncBackendRepository.ensureLoaded()
-        when (val result = syncBackendRepository.refreshFromManifest()) {
-            SyncBackendRefreshResult.NotConfigured,
-            is SyncBackendRefreshResult.Failed,
-            SyncBackendRefreshResult.Unchanged -> Unit
-            is SyncBackendRefreshResult.Applied -> {
-                supabaseProvider.rebuildClient()
-                avatarRepository.invalidateCache()
-            }
-            is SyncBackendRefreshResult.RequiresLogout -> {
-                authManager.resetForSyncBackendChange()
-                    .onSuccess {
-                        syncBackendRepository.applyBackendAfterLogout(result.targetBackend, result.revision)
-                        supabaseProvider.rebuildClient()
-                        avatarRepository.invalidateCache()
-                    }
-                    .onFailure { error ->
-                        Log.w(SYNC_BACKEND_SWITCH_TAG, "Failed to reset auth for sync backend change", error)
-                    }
-            }
-        }
+    suspend fun refreshSelection() = mutex.withLock {
+        syncBackendRepository.refreshFromManifest()
+        Unit
     }
 
-    suspend fun switchDebugBackend(backend: SyncBackendConfig): Result<Unit> = refreshMutex.withLock {
-        if (!syncBackendRepository.canApplyDebugBackend(backend)) {
-            return@withLock Result.failure(IllegalStateException("Debug backend switcher is not available in this build"))
-        }
-
-        authManager.resetForSyncBackendChange().mapCatching {
-            val appliedBackend = syncBackendRepository.applyDebugBackendAfterLogout(backend)
-                ?: error("Debug backend switcher is not available in this build")
-            Log.d(SYNC_BACKEND_SWITCH_TAG, "Applied debug sync backend: ${appliedBackend.id}")
-            supabaseProvider.rebuildClient()
-            avatarRepository.invalidateCache()
-        }
+    suspend fun switchDebugBackend(backend: SyncBackendConfig): Result<Unit> = mutex.withLock {
+        // Once started, leaving the screen must not interrupt the durable selection/restart.
+        withContext(kotlinx.coroutines.NonCancellable) { runCatching {
+            check(backend.isUsableClientConfig()) { "Invalid backend configuration" }
+            check(!com.nuvio.tv.core.profile.ConfigurationMutation.active) { "Configuration copy in progress" }
+            check(!java.io.File(context.filesDir, "configuration_restore").exists()) { "Restore in progress" }
+            if (backend.id == syncBackendRepository.selectedBackend.id) return@runCatching
+            BackendWorkspaceStore.beginSwitch()
+            workspaceSwitchTransaction(
+                switchAndRestart = {
+                    authManager.disconnectForWorkspaceSwitch()
+                    com.nuvio.tv.data.local.ConfigurationSnapshotGate.mutex.withLock {
+                        withContext(Dispatchers.IO) { BackendWorkspaceStore.selectForNextLaunch(context, backend) }
+                        WorkspaceRestartActivity.launch(context)
+                    }
+                },
+                rollback = {
+                    withContext(Dispatchers.IO) {
+                        BackendWorkspaceStore.selectForNextLaunch(context, syncBackendRepository.selectedBackend)
+                    }
+                },
+                unblock = BackendWorkspaceStore::cancelSwitch,
+            )
+        } }
     }
 }

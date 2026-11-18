@@ -1,0 +1,10 @@
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="workspace_title">Sync server</string>
+    <string name="workspace_official">Official Tuvora</string>
+    <string name="workspace_personal">Personal server</string>
+    <string name="workspace_separate">Accounts and data are separate on each server.</string>
+    <string name="workspace_credentials_notice">Sync sends playlist login details to the selected server. It is not end-to-end encrypted.</string>
+    <string name="workspace_confirm_title">Change sync server?</string>
+    <string name="workspace_confirm_message">Your current data will remain on this device in its own space. The app will restart and you must sign in to the selected server. No playlists will be transferred.</string>
+    <string name="workspace_switching">Changing server…</string>
+</resources>

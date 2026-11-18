@@ -241,6 +241,7 @@ data class PlayerUiState(
     /** F36 manual zoom on top of [aspectMode] (PlayerPreferencePolicy); per series when remembering. */
     val videoZoom: VideoZoom = VideoZoom.IDENTITY,
     val showVideoZoomPanel: Boolean = false,
+    val showAspectModeDialog: Boolean = false,
     val tunneledSurfaceFill: Boolean = false,
     val tunnelingEnabled: Boolean = false,
     val showAspectRatioIndicator: Boolean = false,
@@ -384,6 +385,10 @@ sealed class PlayerEvent {
     data class OnAdjustVideoZoom(val axis: VideoZoomAxis, val steps: Int) : PlayerEvent()
     data object OnResetVideoZoom : PlayerEvent()
     data object OnToggleAspectRatio : PlayerEvent()
+    data object OnShowAspectModeDialog : PlayerEvent()
+    data object OnDismissAspectModeDialog : PlayerEvent()
+    data class OnSelectAspectMode(val mode: AspectMode) : PlayerEvent()
+    data object OnApplyAspectModeToAll : PlayerEvent()
     data object OnSwitchInternalPlayerEngine : PlayerEvent()
     data object OnShowStreamInfo : PlayerEvent()
     data object OnDismissStreamInfo : PlayerEvent()

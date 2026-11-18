@@ -62,7 +62,8 @@ internal fun CopyProfileSettingsDialog(
             sources.forEach { profile ->
                 Choice(profile.name, source == profile.id, !isCopying) { source = profile.id }
             }
-            CopyOptions(options, !isCopying) { options = it }
+            CopyOptions(options, !isCopying, !targetProfile.usesPrimaryAddons) { options = it }
+            if (targetProfile.usesPrimaryAddons) Text(stringResource(R.string.profile_copy_addons_shared))
         }
         Text(stringResource(R.string.profile_copy_exclusions_v2))
         errorMessage?.let { Text(it) }
@@ -77,8 +78,9 @@ internal fun CopyProfileSettingsDialog(
 }
 
 @Composable
-private fun CopyOptions(value: ProfileCopyOptions, enabled: Boolean, onChange: (ProfileCopyOptions) -> Unit) {
+private fun CopyOptions(value: ProfileCopyOptions, enabled: Boolean, addonsEnabled: Boolean = true, onChange: (ProfileCopyOptions) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Choice(stringResource(R.string.profile_copy_addons), value.copyAddons, enabled && addonsEnabled) { onChange(value.copy(copyAddons = !value.copyAddons)) }
         Choice(stringResource(R.string.profile_copy_iptv), value.copyIptv, enabled) { onChange(value.copy(copyIptv = !value.copyIptv)) }
         Choice(stringResource(R.string.profile_copy_other_connections), value.copyOtherConnections, enabled) { onChange(value.copy(copyOtherConnections = !value.copyOtherConnections)) }
         Choice(stringResource(R.string.profile_copy_preferences), value.copySettings, enabled) { onChange(value.copy(copySettings = !value.copySettings)) }

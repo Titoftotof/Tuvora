@@ -188,6 +188,18 @@ class ProfileManager @Inject constructor(
         (remoteIds - previousIds).forEach { id -> factory.markProfileCreated(id) }
     }
 
+    internal suspend fun profileSyncSnapshot() = profileDataStore.profileSyncSnapshot()
+
+    internal suspend fun markProfilesSynced(revision: Long) = profileDataStore.markProfilesSynced(revision)
+
+    internal suspend fun applyRemoteProfiles(remoteProfiles: List<UserProfile>, revision: Long): Boolean {
+        val previousIds = profileDataStore.replaceProfilesFromRemote(remoteProfiles, revision) ?: return false
+        val remoteIds = remoteProfiles.map { it.id }.toSet()
+        (previousIds - remoteIds).forEach { id -> removeLocalProfileData(id) }
+        (remoteIds - previousIds).forEach { id -> factory.markProfileCreated(id) }
+        return true
+    }
+
     private suspend fun removeLocalProfileData(id: Int) {
         if (id == 1) return
         credentialStores.forEach { store -> store.removeProfile(id) }

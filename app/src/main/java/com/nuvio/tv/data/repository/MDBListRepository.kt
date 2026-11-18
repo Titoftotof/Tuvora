@@ -118,7 +118,8 @@ class MDBListRepository internal constructor(
         extractImdbId(meta.imdbId)?.let { return MediaRef("imdb", it, mediaType) }
 
         // 2. Try TMDB ID directly — no need to convert to IMDB.
-        val tmdbId = extractPrefixedId(meta.id, "tmdb")
+        val tmdbId = meta.tmdbId?.takeIf { it > 0 }?.toString()
+            ?: extractPrefixedId(meta.id, "tmdb")
             ?: extractPrefixedId(fallbackItemId, "tmdb")
 
         if (tmdbId != null) {

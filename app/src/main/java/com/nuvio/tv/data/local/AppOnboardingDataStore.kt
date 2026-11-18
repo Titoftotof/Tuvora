@@ -7,23 +7,27 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.preferencesDataStoreFile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val Context.appOnboardingDataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "app_onboarding",
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
-)
+
 
 @Singleton
 class AppOnboardingDataStore @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val dataStore = context.appOnboardingDataStore
+    private val dataStore = androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(
+        corruptionHandler = androidx.datastore.core.handlers.ReplaceFileCorruptionHandler {
+            androidx.datastore.preferences.core.emptyPreferences()
+        },
+        produceFile = {
+            java.io.File(com.nuvio.tv.core.network.BackendWorkspaceStore.deviceContext(context).filesDir, "datastore/app_onboarding.preferences_pb")
+        }
+    )
     private val hasSeenAuthQrOnFirstLaunchKey = booleanPreferencesKey("has_seen_auth_qr_on_first_launch")
 
     val hasSeenAuthQrOnFirstLaunch: Flow<Boolean> = dataStore.data.map { prefs ->

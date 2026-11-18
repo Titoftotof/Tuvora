@@ -10,6 +10,25 @@ import java.io.IOException
 
 class SecureAuthSessionManagerTest {
     private val session = UserSession(accessToken = "private-access", refreshToken = "private-refresh", expiresIn = 3600, tokenType = "bearer")
+    @Test fun `different servers never load each others stored session`() = runTest {
+        val store = mockk<SecureCredentialStore>()
+        val saved = mutableMapOf<String, String>()
+        coEvery { store.write(0, "main_auth", any(), any()) } answers { saved[arg(2)] = arg(3) }
+        coEvery { store.read(0, "main_auth", any()) } answers {
+            saved[arg<String>(2)]?.let { SecureCredentialStore.ReadResult.Success(it) }
+                ?: SecureCredentialStore.ReadResult.NotFound
+        }
+        val legacyA = mockk<SessionManager>(relaxed = true)
+        val legacyB = mockk<SessionManager>()
+        coEvery { legacyB.loadSession() } throws IOException("No session")
+        val first = SecureAuthSessionManager(store, "https://personal.test", legacyA)
+        val other = SecureAuthSessionManager(store, "https://official.test", legacyB)
+        first.saveSession(session)
+        assertEquals(session, first.loadSession())
+        assertTrue(runCatching { other.loadSession() }.isFailure)
+        assertEquals(1, saved.size)
+    }
+
     @Test fun `legacy session is removed only after a verified encrypted write`() = runTest {
         val store = mockk<SecureCredentialStore>()
         val legacy = mockk<SessionManager>()

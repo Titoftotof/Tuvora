@@ -25,6 +25,8 @@ class SecureAuthSessionManager(
     override suspend fun saveSession(session: UserSession) = mutex.withLock { persist(session) }
 
     private suspend fun persist(session: UserSession) {
+        // A late auto-refresh must not recreate a session after workspace sign-out.
+        if (com.nuvio.tv.core.network.BackendWorkspaceStore.switching) return
         val encoded = json.encodeToString(UserSession.serializer(), session)
         store.write(0, "main_auth", ref, encoded)
         check((store.read(0, "main_auth", ref) as? SecureCredentialStore.ReadResult.Success)?.value == encoded)

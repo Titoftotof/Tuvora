@@ -12,197 +12,57 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-private const val SYNC_BACKEND_REPOSITORY_TAG = "SyncBackendRepository"
-
+/** The backend is immutable until process restart; manifests only control rollout flags. */
 @Singleton
 class SyncBackendRepository @Inject constructor(
-    private val storage: SyncBackendStorage,
     private val okHttpClient: OkHttpClient,
-    // Lazy breaks the DI cycle (AuthManager depends on SyncBackendRepository). Used only to read the
-    // signed-in account id for the B24 v2 cohort at manifest-apply time.
     private val authManager: Lazy<AuthManager>,
 ) {
-    private val json = Json {
-        ignoreUnknownKeys = true
-        encodeDefaults = true
-    }
+    private val json = Json { ignoreUnknownKeys = true }
+    private val mutableState = MutableStateFlow(SyncBackendState())
+    val state: StateFlow<SyncBackendState> = mutableState.asStateFlow()
+    val selectedBackend: SyncBackendConfig get() { ensureLoaded(); return state.value.selectedBackend }
 
-    private val _state = MutableStateFlow(SyncBackendState())
-    val state: StateFlow<SyncBackendState> = _state.asStateFlow()
-
-    val selectedBackend: SyncBackendConfig
-        get() {
-            ensureLoaded()
-            return _state.value.selectedBackend
-        }
-
-    fun ensureLoaded() {
-        if (_state.value.isLoaded) return
-
-        val storedSelection = storage.loadSelectionPayload()
-            ?.takeIf { it.isNotBlank() }
-            ?.let { payload ->
-                runCatching { json.decodeFromString<StoredSyncBackendSelection>(payload) }
-                    .onFailure { error -> Log.w(SYNC_BACKEND_REPOSITORY_TAG, "Failed to parse stored sync backend selection", error) }
-                    .getOrNull()
-            }
-
-        val storedManualDebugOverride = storedSelection?.manualDebugOverride == true
-        val backend = if (storedManualDebugOverride && !BuildConfig.IS_DEBUG_BUILD) {
-            SyncBackendDefaults.hosted()
-        } else {
-            storedSelection
-                ?.let { selection ->
-                    selection.backendId.ifBlank { selection.backend?.id.orEmpty() }
-                }
-                ?.let(SyncBackendDefaults::byId)
-                ?: SyncBackendDefaults.hosted()
-        }
-
-        _state.value = SyncBackendState(
-            selectedBackend = backend,
-            appliedRevision = if (storedManualDebugOverride && !BuildConfig.IS_DEBUG_BUILD) {
-                ""
-            } else {
-                storedSelection?.appliedRevision.orEmpty()
-            },
-            isLoaded = true,
-            isManualDebugOverride = storedManualDebugOverride && BuildConfig.IS_DEBUG_BUILD,
-        )
-    }
-
-    suspend fun refreshFromManifest(): SyncBackendRefreshResult {
-        ensureLoaded()
-
-        if (_state.value.isManualDebugOverride && BuildConfig.IS_DEBUG_BUILD) {
-            return SyncBackendRefreshResult.Unchanged
-        }
-
-        val manifestUrl = BuildConfig.SYNC_BACKEND_MANIFEST_URL.trim()
-        if (manifestUrl.isBlank()) {
-            return SyncBackendRefreshResult.NotConfigured
-        }
-
-        val manifest = runCatching {
-            json.decodeFromString<SyncBackendManifest>(fetchManifestText(manifestUrl))
-        }.onFailure { error ->
-            val message = error.message ?: "Failed to fetch sync backend manifest"
-            Log.w(SYNC_BACKEND_REPOSITORY_TAG, message, error)
-            _state.value = _state.value.copy(lastManifestError = message)
-        }.getOrNull() ?: return SyncBackendRefreshResult.Failed(
-            _state.value.lastManifestError ?: "Failed to fetch sync backend manifest",
-        )
-
-        // B24 — resolve this client's effective v2 rollout from the manifest cohort (percent-by-account
-        // + platform), evaluated against this device's account id + platform, and publish it into the
-        // core-owned signal the IPTV activation policy reads. Cohorting is a client-side feature-flag
-        // decision (the backend contract enforces safety regardless). Null mode ⇒ client build default;
-        // a missing account buckets out of an enabled cohort until sign-in.
-        PlaylistSyncRolloutSignal.raw = manifest.iptvPlaylistV2?.let { rawMode ->
-            PlaylistV2CohortPolicy.resolveMode(
-                rawMode = rawMode,
-                percent = manifest.iptvPlaylistV2Percent,
-                platforms = manifest.iptvPlaylistV2Platforms,
-                userId = runCatching { authManager.get().currentUserId }.getOrNull(),
-                platform = "tv",
-            )
-        }
-
-        val targetBackend = manifest.backendConfigForActiveBackend()
-            ?: return SyncBackendRefreshResult.Failed("Sync backend manifest is invalid")
-        val revision = manifest.revision.trim()
-        val currentBackend = _state.value.selectedBackend
-
-        if (currentBackend.hasSameConnectionIdentity(targetBackend)) {
-            saveSelection(targetBackend, revision)
-            return SyncBackendRefreshResult.Unchanged
-        }
-
-        if (!manifest.forceLogoutOnChange) {
-            saveSelection(targetBackend, revision)
-            return SyncBackendRefreshResult.Applied(targetBackend, revision)
-        }
-
-        return SyncBackendRefreshResult.RequiresLogout(
-            currentBackend = currentBackend,
-            targetBackend = targetBackend,
-            revision = revision,
-            forceLogout = true,
-        )
-    }
-
-    fun applyBackendAfterLogout(
-        backend: SyncBackendConfig,
-        revision: String,
-    ): SyncBackendConfig {
-        val normalizedBackend = backend.normalized()
-        saveSelection(normalizedBackend, revision, manualDebugOverride = false)
-        return normalizedBackend
+    @Synchronized fun ensureLoaded() {
+        if (state.value.isLoaded) return
+        val backend = checkNotNull(SyncBackendDefaults.byId(BackendWorkspaceStore.active.backendId))
+        mutableState.value = SyncBackendState(selectedBackend = backend, isLoaded = true)
     }
 
     fun debugSelectableBackends(): List<SyncBackendConfig> =
-        listOf(SyncBackendDefaults.hosted(), SyncBackendDefaults.nuvio())
-            .filter { backend -> backend.isUsableClientConfig() }
+        listOf(SyncBackendDefaults.nuvio(), SyncBackendDefaults.hosted()).filter { it.isUsableClientConfig() }
 
-    fun canApplyDebugBackend(backend: SyncBackendConfig): Boolean =
-        BuildConfig.IS_DEBUG_BUILD && backend.normalized().isUsableClientConfig()
-
-    fun applyDebugBackendAfterLogout(backend: SyncBackendConfig): SyncBackendConfig? {
-        if (!canApplyDebugBackend(backend)) return null
-
-        val normalizedBackend = backend.normalized()
-
-        saveSelection(
-            backend = normalizedBackend,
-            revision = DEBUG_MANUAL_REVISION,
-            manualDebugOverride = true,
-        )
-        return normalizedBackend
-    }
-
-    private fun saveSelection(
-        backend: SyncBackendConfig,
-        revision: String,
-        manualDebugOverride: Boolean = false,
-    ) {
-        val normalizedBackend = backend.normalized()
-        val payload = json.encodeToString(
-            StoredSyncBackendSelection(
-                backendId = normalizedBackend.id,
-                appliedRevision = revision,
-                manualDebugOverride = manualDebugOverride,
-            ),
-        )
-        storage.saveSelectionPayload(payload)
-        _state.value = SyncBackendState(
-            selectedBackend = normalizedBackend,
-            appliedRevision = revision,
-            isLoaded = true,
-            isManualDebugOverride = manualDebugOverride,
-        )
-    }
-
-    private companion object {
-        const val DEBUG_MANUAL_REVISION = "debug-manual"
-    }
-
-    private suspend fun fetchManifestText(manifestUrl: String): String = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url(manifestUrl)
-            .get()
-            .build()
-        okHttpClient.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw IOException("Sync backend manifest request failed (${response.code}): $body")
+    suspend fun refreshFromManifest(): SyncBackendRefreshResult {
+        ensureLoaded()
+        val url = BuildConfig.SYNC_BACKEND_MANIFEST_URL.trim()
+        if (url.isBlank()) return SyncBackendRefreshResult.NotConfigured
+        return try {
+            require(url.startsWith("https://"))
+            val manifest = withContext(Dispatchers.IO) {
+                okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("Sync manifest failed (${response.code})")
+                    json.decodeFromString<SyncBackendManifest>(response.body?.string().orEmpty())
+                }
             }
-            body
+            // Never apply rollout decisions belonging to the other server.
+            if (manifest.activeBackend.trim().lowercase() == selectedBackend.id) {
+                PlaylistSyncRolloutSignal.raw = manifest.iptvPlaylistV2?.let { mode ->
+                    PlaylistV2CohortPolicy.resolveMode(
+                        rawMode = mode, percent = manifest.iptvPlaylistV2Percent,
+                        platforms = manifest.iptvPlaylistV2Platforms,
+                        userId = authManager.get().currentUserId, platform = "tv",
+                    )
+                }
+            }
+            SyncBackendRefreshResult.Unchanged
+        } catch (_: Exception) {
+            Log.w("SyncBackendRepository", "Unable to load playlist rollout manifest")
+            mutableState.value = state.value.copy(lastManifestError = "Unable to load sync configuration")
+            SyncBackendRefreshResult.Failed("Unable to load sync configuration")
         }
     }
 }

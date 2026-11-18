@@ -253,6 +253,62 @@ class IptvMovieMetadataTest {
         assertNull("the poster is not offered as a landscape backdrop either", meta.backdropUrl)
     }
 
+    @Test
+    fun `panel TMDB id does not depend on the local index`() = runTest {
+        allowAccount()
+        coEvery { client.vodDetails(any(), VOD_ID) } returns Result.success(vodInfo(tmdbId = 27205))
+        coEvery { tmdb.fetchEnrichment("27205", ContentType.MOVIE, "fr") } returns enrichment(description = "TMDB plot")
+        val meta = metadata().resolve(item())
+        assertEquals("TMDB plot", meta.description)
+        assertEquals(27205, meta.tmdbId)
+        assertEquals(movieId, meta.id)
+        coVerify(exactly = 0) { index.item(any(), any(), any()) }
+    }
+
+    @Test
+    fun `empty panel name uses catalog title`() = runTest {
+        allowAccount()
+        coEvery { client.vodDetails(any(), VOD_ID) } returns Result.success(vodInfo().copy(name = " "))
+        coEvery { index.item(any(), MatchKind.MOVIE, VOD_ID) } returns null
+        coEvery { api.searchMovies(any(), "inception", 2010, "fr") } returns Response.success(
+            IptvMovieSearchResponse(results = listOf(
+                IptvMovieSearchResult(id = 27205, title = "Inception", releaseDate = "2010-07-15")
+            ))
+        )
+        coEvery { tmdb.fetchEnrichment(any(), any(), any()) } returns enrichment(description = "TMDB plot")
+        assertEquals("TMDB plot", metadata().resolve(item()).description)
+    }
+
+    @Test
+    fun `catalog title is retried after an empty panel title search`() = runTest {
+        allowAccount()
+        coEvery { client.vodDetails(any(), VOD_ID) } returns Result.success(vodInfo().copy(name = "Panel alias"))
+        coEvery { index.item(any(), MatchKind.MOVIE, VOD_ID) } returns null
+        coEvery { api.searchMovies(any(), "panel alias", 2010, "fr") } returns Response.success(
+            IptvMovieSearchResponse(results = emptyList())
+        )
+        coEvery { api.searchMovies(any(), "inception", 2010, "fr") } returns Response.success(
+            IptvMovieSearchResponse(results = listOf(
+                IptvMovieSearchResult(id = 27205, title = "Inception", releaseDate = "2010-07-15")
+            ))
+        )
+        coEvery { tmdb.fetchEnrichment(any(), any(), any()) } returns enrichment(description = "TMDB plot")
+        assertEquals("TMDB plot", metadata().resolve(item()).description)
+    }
+
+    @Test
+    fun `crew portraits are merged without dropping provider cast`() {
+        val base = providerMovieMeta(item().toMeta(), vodInfo(cast = "Panel actor"))
+        val director = MetaCastMember(name = "Director", character = "Director", photo = "https://image.test/director", tmdbId = 1)
+        val writer = MetaCastMember(name = "Writer", character = "Writer", tmdbId = 2)
+        val data = enrichment().copy(directorMembers = listOf(director), writerMembers = listOf(writer))
+        val merged = mergeMovieEnrichment(base, data, TmdbSettings(enabled = true))
+        assertEquals(listOf(director, writer) + base.castMembers, merged.castMembers)
+        assertEquals(base.cast, merged.cast)
+        assertEquals(base.castMembers, mergeMovieEnrichment(base, data,
+            TmdbSettings(enabled = true, useCredits = false)).castMembers)
+    }
+
     private fun vodInfo(
         tmdbId: Int? = null,
         movieImage: String? = "https://panel.test/poster.jpg",
