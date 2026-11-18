@@ -35,4 +35,31 @@ class GuidePlaybackInteractionPolicyTest {
         assertTrue(GuidePlaybackInteractionPolicy.coverFailedFrame(true))
         assertFalse(GuidePlaybackInteractionPolicy.coverFailedFrame(false))
     }
+
+    @Test fun `long-press Back returns to fullscreen only when in guide and video is playing`() {
+        // While browsing guide with active playback: long-press Back jumps to fullscreen
+        assertTrue(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(
+            fullscreen = false, hasPlayback = true, isLongPress = true))
+
+        // Short press on Back does NOT jump to fullscreen (it must unwind guide navigation)
+        assertFalse(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(
+            fullscreen = false, hasPlayback = true, isLongPress = false))
+
+        // If no playback is active, long-press Back does not jump to fullscreen
+        assertFalse(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(
+            fullscreen = false, hasPlayback = false, isLongPress = true))
+
+        // If already in fullscreen, Back is handled by fullscreen exit/collapse policy
+        assertFalse(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(
+            fullscreen = true, hasPlayback = true, isLongPress = true))
+    }
+
+    @Test fun `Play button in guide returns to fullscreen when playback is active`() {
+        assertTrue(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(
+            fullscreen = false, hasPlayback = true))
+        assertFalse(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(
+            fullscreen = false, hasPlayback = false))
+        assertFalse(GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(
+            fullscreen = true, hasPlayback = true))
+    }
 }

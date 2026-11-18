@@ -18,4 +18,15 @@ internal object GuidePlaybackInteractionPolicy {
         focusedId != null && focusedId == errorChannelId
 
     fun coverFailedFrame(hasPlaybackError: Boolean): Boolean = hasPlaybackError
+
+    fun shouldReturnToFullscreenOnBack(
+        fullscreen: Boolean,
+        hasPlayback: Boolean,
+        isLongPress: Boolean,
+    ): Boolean = !fullscreen && hasPlayback && isLongPress
+
+    fun shouldReturnToFullscreenOnPlay(
+        fullscreen: Boolean,
+        hasPlayback: Boolean,
+    ): Boolean = !fullscreen && hasPlayback
 }

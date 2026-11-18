@@ -376,6 +376,7 @@ fun LiveGuide(
     }
 
     val okPressGate = remember { LiveOkPressGate() }
+    var backLongPressed by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(false) }
     var controlsTick by remember { mutableStateOf(0) }
     // F08: the channel list over fullscreen video, and the previous channel for the LAST key.
@@ -474,6 +475,32 @@ fun LiveGuide(
             // arrive there — intercept them in the preview phase before the row's clickable.
             // BACK is NOT consumed (BackHandler collapses). UP/DOWN zap channels.
             .onPreviewKeyEvent { event ->
+                if (!fullscreen) {
+                    val hasPlayback = readyPlayback != null || playingContentId != null || pendingContentId != null
+                    if (event.key == Key.Back) {
+                        if (event.type == KeyEventType.KeyDown) {
+                            val isLong = event.nativeKeyEvent.isLongPress || event.nativeKeyEvent.repeatCount >= 1
+                            if (GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(fullscreen, hasPlayback, isLong)) {
+                                if (!backLongPressed) {
+                                    backLongPressed = true
+                                    onFullscreenChange(true)
+                                }
+                                return@onPreviewKeyEvent true
+                            }
+                        } else if (event.type == KeyEventType.KeyUp) {
+                            if (backLongPressed) {
+                                backLongPressed = false
+                                return@onPreviewKeyEvent true
+                            }
+                        }
+                    } else if (event.key == Key.MediaPlay || event.key == Key.MediaPlayPause) {
+                        if (event.type == KeyEventType.KeyDown &&
+                            GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(fullscreen, hasPlayback)) {
+                            onFullscreenChange(true)
+                            return@onPreviewKeyEvent true
+                        }
+                    }
+                }
                 // Observe the guide's press before promotion too: its remaining events must not
                 // become a click on the fullscreen controls after focus moves.
                 val proposed = if (fullscreen) LiveControlsPolicy.keyAction(
