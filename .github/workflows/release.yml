@@ -72,7 +72,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Cache Gradle (deps + build cache)
         uses: gradle/actions/setup-gradle@v4
@@ -154,6 +154,7 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          chmod +x gradlew
           export NUVIO_RELEASE_STORE_FILE="$GITHUB_WORKSPACE/release.jks"
           export NUVIO_RELEASE_STORE_PASSWORD="${RELEASE_STORE_PASSWORD:-815787}"
           export NUVIO_RELEASE_KEY_ALIAS="${RELEASE_KEY_ALIAS:-nuviotv}"
