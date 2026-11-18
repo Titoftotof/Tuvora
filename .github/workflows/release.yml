@@ -88,6 +88,8 @@ jobs:
         run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Install PostHog symbol uploader
+        env:
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
         run: |
           if [ -n "$POSTHOG_CLI_API_KEY" ]; then
             npm install --global @posthog/cli@0.10.0
@@ -96,9 +98,11 @@ jobs:
           fi
 
       - name: Setup signing keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/release.jks"
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.jks"
           else
             echo "Generating fallback signing keystore..."
             keytool -genkeypair -v -keystore "$GITHUB_WORKSPACE/release.jks" -alias nuviotv \
@@ -108,20 +112,32 @@ jobs:
           fi
 
       - name: Configure local.properties
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+          SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
+          DONATIONS_DONATE_URL: ${{ secrets.DONATIONS_DONATE_URL }}
         run: |
           {
             echo "NUVIO_RELEASE_STORE_FILE=$GITHUB_WORKSPACE/release.jks"
-            echo "NUVIO_RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD || '815787' }}"
-            echo "NUVIO_RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS || 'nuviotv' }}"
-            echo "NUVIO_RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD || '815787' }}"
-            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
-            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
-            echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}"
-            echo "TRAKT_CLIENT_ID=${{ secrets.TRAKT_CLIENT_ID }}"
-            echo "TRAKT_CLIENT_SECRET=${{ secrets.TRAKT_CLIENT_SECRET }}"
-            echo "SIMKL_CLIENT_ID=${{ secrets.SIMKL_CLIENT_ID }}"
-            echo "SIMKL_CLIENT_SECRET=${{ secrets.SIMKL_CLIENT_SECRET }}"
-            echo "DONATIONS_DONATE_URL=${{ secrets.DONATIONS_DONATE_URL }}"
+            echo "NUVIO_RELEASE_STORE_PASSWORD=${RELEASE_STORE_PASSWORD:-815787}"
+            echo "NUVIO_RELEASE_KEY_ALIAS=${RELEASE_KEY_ALIAS:-nuviotv}"
+            echo "NUVIO_RELEASE_KEY_PASSWORD=${RELEASE_KEY_PASSWORD:-815787}"
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
+            echo "TMDB_API_KEY=$TMDB_API_KEY"
+            echo "TRAKT_CLIENT_ID=$TRAKT_CLIENT_ID"
+            echo "TRAKT_CLIENT_SECRET=$TRAKT_CLIENT_SECRET"
+            echo "SIMKL_CLIENT_ID=$SIMKL_CLIENT_ID"
+            echo "SIMKL_CLIENT_SECRET=$SIMKL_CLIENT_SECRET"
+            echo "DONATIONS_DONATE_URL=$DONATIONS_DONATE_URL"
           } >> local.properties
 
       - name: Verify local.properties keys reached the build
@@ -134,11 +150,14 @@ jobs:
 
       - name: Build signed release APK + AAB
         env:
-          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/release.jks
-          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || '815787' }}
-          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || 'nuviotv' }}
-          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || '815787' }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          export NUVIO_RELEASE_STORE_FILE="$GITHUB_WORKSPACE/release.jks"
+          export NUVIO_RELEASE_STORE_PASSWORD="${RELEASE_STORE_PASSWORD:-815787}"
+          export NUVIO_RELEASE_KEY_ALIAS="${RELEASE_KEY_ALIAS:-nuviotv}"
+          export NUVIO_RELEASE_KEY_PASSWORD="${RELEASE_KEY_PASSWORD:-815787}"
           ./gradlew :app:assembleFullRelease \
             -PversionNameOverride="${{ steps.ver.outputs.version }}" \
             -PversionCodeOverride="${{ github.run_number }}" --stacktrace
@@ -147,17 +166,23 @@ jobs:
             -PversionCodeOverride="${{ github.run_number }}" --stacktrace
 
       - name: Decode Play upload keystore
-        if: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 != '' }}
-        run: echo "${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/play-upload.jks"
+        env:
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+        if: env.PLAY_UPLOAD_KEYSTORE_BASE64 != ''
+        run: echo "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/play-upload.jks"
 
       - name: Build Play Store AAB (playstore flavor, dedicated upload key)
-        if: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 != '' }}
         env:
-          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/play-upload.jks
-          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_STORE_PASSWORD }}
-          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
-          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_STORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_STORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+        if: env.PLAY_UPLOAD_KEYSTORE_BASE64 != ''
         run: |
+          export NUVIO_RELEASE_STORE_FILE="$GITHUB_WORKSPACE/play-upload.jks"
+          export NUVIO_RELEASE_STORE_PASSWORD="${PLAY_UPLOAD_STORE_PASSWORD:-815787}"
+          export NUVIO_RELEASE_KEY_ALIAS="${PLAY_UPLOAD_KEY_ALIAS:-nuviotv}"
+          export NUVIO_RELEASE_KEY_PASSWORD="${PLAY_UPLOAD_KEY_PASSWORD:-815787}"
           ./gradlew :app:bundlePlaystoreRelease \
             -PversionNameOverride="${{ steps.ver.outputs.version }}" \
             -PversionCodeOverride="${{ github.run_number }}" --stacktrace
@@ -190,7 +215,9 @@ jobs:
 
       # Play publishing runs only if credentials are set
       - name: Publish AAB to Google Play
-        if: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        if: env.PLAY_SERVICE_ACCOUNT_JSON != ''
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
