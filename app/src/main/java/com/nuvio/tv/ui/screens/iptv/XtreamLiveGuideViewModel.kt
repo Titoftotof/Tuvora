@@ -44,7 +44,14 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /** A category entry in the guide's left column. [special] marks the synthetic ones. */
-enum class GuideSpecial { SEARCH, FAVORITES, RECENT, ALL, GROUP, ALL_FAVORITES }
+enum class GuideSpecial(val labelRes: Int?) {
+    SEARCH(com.nuvio.tv.R.string.iptv_guide_search_channels),
+    ALL_FAVORITES(com.nuvio.tv.R.string.iptv_guide_all_favorites),
+    FAVORITES(com.nuvio.tv.R.string.iptv_guide_favorites),
+    RECENT(com.nuvio.tv.R.string.iptv_guide_recent),
+    ALL(com.nuvio.tv.R.string.iptv_guide_all_channels),
+    GROUP(null),
+}
 data class GuideCategory(val id: String, val name: String, val special: GuideSpecial? = null)
 
 /** One channel row in the guide. [categoryId] is null for synthetic rows (Favorites/Recent
@@ -250,6 +257,7 @@ class XtreamLiveGuideViewModel @Inject constructor(
     private var lastAllChannelsView: Boolean = false
     // Same for the CATEGORY column: the raw provider categories + account, so a category reorder/hide/rename
     // from the website re-applies live. (Also declared before init, for the same inline-emit reason.)
+    private var hiddenShortcutCategories: Set<String> = emptySet()
     private var lastRawCategories: List<GuideCategory> = emptyList()
     private var lastCategoryAccountId: String? = null
 
@@ -645,14 +653,7 @@ class XtreamLiveGuideViewModel @Inject constructor(
                 channelsCache.remove("${acc.id}|$ALL_ID")
                 val selectedId = _uiState.value.selectedCategoryId
                 if (visible.none { it.id == selectedId }) {
-                    // The selected category just got deselected: fall back to "All channels".
-                    selectCategoryFor(
-                        acc = acc,
-                        categoryId = visible.firstOrNull { c -> c.special == GuideSpecial.ALL }?.id
-                            ?: visible.firstOrNull()?.id,
-                        force = false,
-                        token = accountToken,
-                    )
+                    selectVisibleCategory(acc, visible, accountToken)
                 } else if (selectedId == ALL_ID) {
                     // Still on "All channels": refresh the displayed list under the new selections.
                     selectCategoryFor(acc, selectedId, force = true, token = accountToken)
@@ -748,7 +749,9 @@ class XtreamLiveGuideViewModel @Inject constructor(
     /** "All channels" — or All favorites while a cross-playlist favourite waits to be tuned (F03). */
     private fun defaultCategoryId(visible: List<GuideCategory>): String? =
         (if (_uiState.value.pendingTune != null) visible.firstOrNull { it.special == GuideSpecial.ALL_FAVORITES } else null)?.id
-            ?: visible.firstOrNull { c -> c.special == GuideSpecial.ALL }?.id
+            ?: visible.firstOrNull { it.special == GuideSpecial.ALL }?.id
+            ?: visible.firstOrNull { it.special == null || it.special == GuideSpecial.GROUP }?.id
+            ?: visible.firstOrNull { it.special != GuideSpecial.SEARCH }?.id
             ?: visible.firstOrNull()?.id
 
     /** The classified, photograph-friendly failure line (same wording as the hub's error card). */
@@ -785,10 +788,48 @@ class XtreamLiveGuideViewModel @Inject constructor(
         loadCategoryColumn(acc, token)
     }
 
-    /** Category selections hide deselected provider categories; the synthetic ones
-     *  (Favorites/Recent/All channels) are always shown. */
     private fun filteredCategories(acc: XtreamAccount, full: List<GuideCategory>): List<GuideCategory> =
-        full.filter { it.special != null || acc.allowsCategory(XtreamAccount.TYPE_LIVE, it.id) }
+        full.filter { category ->
+            when (val special = category.special) {
+                null -> acc.allowsCategory(XtreamAccount.TYPE_LIVE, category.id)
+                GuideSpecial.GROUP -> true
+                else -> special.name !in hiddenShortcutCategories
+            }
+        }
+
+    fun setHiddenShortcutCategories(hidden: Set<String>) {
+        if (hidden == hiddenShortcutCategories) return
+        hiddenShortcutCategories = hidden
+        val acc = account ?: return
+        val token = accountCommitFence.capture(acc.id) ?: return
+        if (lastCategoryAccountId != acc.id) return
+        val visible = filteredCategories(acc, withCategoryOverlay(acc.id, lastRawCategories))
+        val selectedId = _uiState.value.selectedCategoryId
+        _uiState.update { it.copy(categories = visible) }
+        val categoriesLoad = _uiState.value.categoriesLoad
+        val categoriesAvailable = categoriesLoad == LoadStatus.Loaded || categoriesLoad == LoadStatus.Empty
+        if (visible.none { it.id == selectedId } && (selectedId != null || categoriesAvailable)) {
+            selectVisibleCategory(acc, visible, token)
+        }
+    }
+
+    private fun selectVisibleCategory(
+        acc: XtreamAccount,
+        visible: List<GuideCategory>,
+        token: LiveGuideAccountCommitToken,
+    ) {
+        val fallback = defaultCategoryId(visible)
+        if (fallback != null) {
+            selectCategoryFor(acc, fallback, force = false, token = token)
+        } else {
+            channelsJob?.cancel()
+            lastRawChannels = emptyList()
+            lineupPool = null
+            _uiState.update {
+                it.copy(selectedCategoryId = null, channels = emptyList(), focusedChannelId = null, channelsLoad = LoadStatus.Idle)
+            }
+        }
+    }
 
     fun selectCategory(categoryId: String?, force: Boolean = false) {
         val acc = account ?: return

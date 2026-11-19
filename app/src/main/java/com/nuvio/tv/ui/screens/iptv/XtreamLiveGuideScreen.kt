@@ -150,7 +150,12 @@ fun LiveGuide(
     val previewPaneHeight = guideLayout.previewHeightDp.dp
 
     // Keyed on the whole account (not just id) so option edits (category selections) re-filter.
-    LaunchedEffect(account) { viewModel.setAccount(account) }
+    LaunchedEffect(account, displayPreferences) {
+        displayPreferences.hiddenCategories.collect { hidden ->
+            viewModel.setHiddenShortcutCategories(hidden)
+            viewModel.setAccount(account)
+        }
+    }
 
     // Minute tick drives the now-progress bar and rolls the timeline window at half-hour marks.
     val nowMs by produceState(System.currentTimeMillis()) {
@@ -577,16 +582,16 @@ fun LiveGuide(
                 itemsIndexed(uiState.categories, key = { _, it -> it.id }) { index, cat ->
                     GuideCategoryRow(
                         label = if (cat.special == GuideSpecial.SEARCH && uiState.searchQuery.isNotBlank()) {
-                            "Search: \u201C${uiState.searchQuery}\u201D"
+                            stringResource(R.string.iptv_guide_search_query, uiState.searchQuery)
                         } else {
-                            cat.name
+                            cat.special?.labelRes?.let { stringResource(it) } ?: cat.name
                         },
                         selected = cat.id == uiState.selectedCategoryId,
                         rightFocus = channelListFocus,
                         // First category routes UP back to the active tab so the tabs stay reachable.
                         upFocus = if (index == 0) selectedTabRequester else null,
                         onFocused = { viewModel.selectCategory(cat.id) },
-                        // F02: MENU on a provider category offers to hide it (Favorites/Recent/All can't be hidden).
+                        // MENU hides a provider category. Shortcut visibility is managed in IPTV settings.
                         onMenu = if (cat.special == null) { { viewModel.hideCategory(cat) } } else null,
                         // F01: OK on "Search" opens the keyboard (focus alone never does).
                         onClick = if (cat.special == GuideSpecial.SEARCH) { { searchDialogOpen = true } } else null,
@@ -663,8 +668,9 @@ fun LiveGuide(
                     // Before the category column lands there is nothing selected yet: still loading, not empty.
                     categoriesStatus is com.nuvio.tv.core.iptv.LoadStatus.Loading && uiState.channels.isEmpty() -> GuideChannelListSkeleton(guideLayout)
                     uiState.selectedCategoryId == XtreamLiveGuideViewModel.SEARCH_ID && uiState.channels.isEmpty() -> EmptyScreenState(
-                        title = if (uiState.searchQuery.isBlank()) "Search channels" else "No channels match \u201C${uiState.searchQuery}\u201D",
-                        subtitle = "Press OK on Search to type a channel name",
+                        title = if (uiState.searchQuery.isBlank()) stringResource(R.string.iptv_guide_search_channels)
+                        else stringResource(R.string.iptv_guide_search_no_match, uiState.searchQuery),
+                        subtitle = stringResource(R.string.iptv_guide_search_hint),
                         height = 280.dp
                     )
                     uiState.channels.isEmpty() -> EmptyScreenState(
@@ -1647,8 +1653,8 @@ private fun GuideSearchDialog(initialQuery: String, onSearch: (String) -> Unit, 
     LaunchedEffect(Unit) { runCatching { fieldFocus.requestFocus() } }
     NuvioDialog(
         onDismiss = onDismiss,
-        title = "Search channels",
-        subtitle = "Type part of a channel name, like \u201Cbbc\u201D or \u201Csky sports\u201D.",
+        title = stringResource(R.string.iptv_guide_search_channels),
+        subtitle = stringResource(R.string.iptv_guide_search_description),
         width = 520.dp
     ) {
         androidx.compose.material3.OutlinedTextField(
@@ -1671,7 +1677,7 @@ private fun GuideSearchDialog(initialQuery: String, onSearch: (String) -> Unit, 
                 cursorColor = NuvioTheme.colors.FocusRing,
             ),
         )
-        Button(onClick = { onSearch(text) }, modifier = Modifier.fillMaxWidth()) { Text("Search") }
-        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+        Button(onClick = { onSearch(text) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.iptv_guide_search_action)) }
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.action_cancel)) }
     }
 }

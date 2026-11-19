@@ -3579,6 +3579,17 @@
     <string name="iptv_guide_hidden_notice_generic">«&#160;%1$s&#160;» masquée. Réaffichez-la dans Paramètres → Intégrations → Playlists IPTV → votre playlist → Chaînes et groupes masqués.</string>
     <string name="iptv_guide_hidden_undo">Annuler</string>
     <string name="iptv_guide_all_favorites">Tous les favoris</string>
+    <string name="iptv_guide_categories_settings">Catégories du guide</string>
+    <string name="iptv_guide_categories_settings_subtitle">Choisissez les raccourcis à afficher dans TV en direct</string>
+    <string name="iptv_guide_search_channels">Rechercher des chaînes</string>
+    <string name="iptv_guide_favorites">Favoris</string>
+    <string name="iptv_guide_recent">Chaînes récentes</string>
+    <string name="iptv_guide_all_channels">Toutes les chaînes</string>
+    <string name="iptv_guide_search_query">Recherche : « %1$s »</string>
+    <string name="iptv_guide_search_no_match">Aucune chaîne ne correspond à « %1$s »</string>
+    <string name="iptv_guide_search_hint">Appuyez sur OK sur Rechercher des chaînes pour saisir un nom</string>
+    <string name="iptv_guide_search_description">Saisissez une partie du nom de la chaîne.</string>
+    <string name="iptv_guide_search_action">Rechercher</string>
     <string name="iptv_guide_favorite_added">«&#160;%1$s&#160;» ajoutée aux favoris.</string>
     <string name="iptv_guide_favorite_removed">«&#160;%1$s&#160;» retirée des favoris.</string>
     <string name="iptv_guide_move_up">Monter</string>

@@ -91,6 +91,8 @@ import com.nuvio.tv.core.iptv.XtreamAccount
 import com.nuvio.tv.core.iptv.PlaylistFormSubmitPolicy
 import com.nuvio.tv.core.iptv.isXtream
 import com.nuvio.tv.core.iptv.parseXtreamAccount
+import com.nuvio.tv.core.iptv.GuideDisplayPreferences
+import com.nuvio.tv.ui.screens.iptv.GuideSpecial
 import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.ui.screens.iptv.ContactDialog
 import com.nuvio.tv.ui.screens.iptv.HoldConfirmDialog
@@ -124,6 +126,7 @@ fun XtreamSettingsContent(
     val managedInfos by viewModel.managedInfos.collectAsStateWithLifecycle()
     val pendingDetails by viewModel.pendingDetails.collectAsStateWithLifecycle()
     var showRegionPicker by remember { mutableStateOf(false) }
+    var showGuideCategories by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(openAddOnEntry) }
     // Step 2: the details PAGE is open for this playlist id (looked up live, so toggles re-render it).
     var actionsForId by remember { mutableStateOf<String?>(null) }
@@ -239,6 +242,12 @@ fun XtreamSettingsContent(
         IptvHomeSettingsEntry()
 
         SettingsActionRow(
+            title = stringResource(R.string.iptv_guide_categories_settings),
+            subtitle = stringResource(R.string.iptv_guide_categories_settings_subtitle),
+            onClick = { showGuideCategories = true },
+        )
+
+        SettingsActionRow(
             title = "Guide regions",
             subtitle = "Choose which countries' EPG this device keeps",
             value = epgRegionSummaryValue(selectedEpgRegions, epgRegions),
@@ -290,6 +299,10 @@ fun XtreamSettingsContent(
                 modifier = Modifier.focusRequester(accountRowFocus.getOrPut(account.id) { FocusRequester() })
             )
         }
+    }
+
+    if (showGuideCategories) {
+        GuideCategoriesSettingsDialog(onDismiss = { showGuideCategories = false })
     }
 
     if (showRegionPicker) {
@@ -695,6 +708,45 @@ private val CONTENT_TYPES = listOf(
 
 /** Matches SettingsMultiChoiceDialog's default list height so the checklist scrolls like other pickers. */
 private val SettingsDialogListMaxHeight = 420.dp
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun GuideCategoriesSettingsDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current.applicationContext
+    val preferences = remember(context) { GuideDisplayPreferences(context) }
+    val hidden by preferences.hiddenCategories.collectAsStateWithLifecycle(initialValue = null)
+    val scope = rememberCoroutineScope()
+    val firstRow = remember { FocusRequester() }
+    LaunchedEffect(hidden != null) {
+        if (hidden != null) firstRow.requestFocusAfterFrames()
+    }
+
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = stringResource(R.string.iptv_guide_categories_settings),
+        subtitle = stringResource(R.string.iptv_guide_categories_settings_subtitle),
+        width = 520.dp,
+        contentSpacing = NuvioTheme.spacing.sm,
+        scrollable = true,
+    ) {
+        hidden?.let { hiddenCategories ->
+            GuideSpecial.entries.forEach { category ->
+                val label = category.labelRes ?: return@forEach
+                val visible = category.name !in hiddenCategories
+                SettingsToggleRow(
+                    title = stringResource(label),
+                    subtitle = null,
+                    checked = visible,
+                    onToggle = { scope.launch { preferences.setCategoryVisible(category.name, !visible) } },
+                    modifier = if (category == GuideSpecial.SEARCH) Modifier.focusRequester(firstRow) else Modifier,
+                )
+            }
+        }
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.action_close))
+        }
+    }
+}
 
 /** Level 1: the three content-type rows (checkbox toggles the type, body opens its checklist). */
 @OptIn(ExperimentalTvMaterial3Api::class)
