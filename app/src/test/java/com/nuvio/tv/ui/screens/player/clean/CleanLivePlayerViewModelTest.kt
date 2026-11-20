@@ -1090,6 +1090,8 @@ class CleanLivePlayerViewModelTest {
             operations += "retry"
         }
 
+        override suspend fun seekTo(positionMs: Long) = Unit
+
         override suspend fun changeProfile(profile: SessionProfile) {
             operations += "changeProfile"
         }

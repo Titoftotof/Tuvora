@@ -32,6 +32,8 @@ internal object LiveControlsPolicy {
         ZAP_BACK,
         OPEN_CHANNEL_MENU,
         OPEN_CHANNEL_LIST,
+        SEEK_FORWARD,
+        SEEK_BACKWARD,
     }
 
     private val directional = setOf(
@@ -39,6 +41,8 @@ internal object LiveControlsPolicy {
         Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
     )
     private val media = setOf(Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause)
+    private val seekForwardKeys = setOf(Key.MediaFastForward, Key.MediaStepForward)
+    private val seekBackwardKeys = setOf(Key.MediaRewind, Key.MediaStepBackward)
     private val channelKeys = setOf(Key.ChannelUp, Key.ChannelDown, Key.LastChannel)
 
     fun keyAction(
@@ -57,8 +61,17 @@ internal object LiveControlsPolicy {
          * that hid the channel name mid-zap and left only a spinner.
          */
         zapReveal: Boolean = false,
+        /** True when a replay/catch-up is playing rather than live TV. */
+        isReplay: Boolean = false,
+        canSeekReplay: Boolean = false,
     ): KeyAction {
         if (panelOpen) return KeyAction.PASS
+        val canSeek = isReplay && canSeekReplay
+        if (key in seekForwardKeys || key in seekBackwardKeys) {
+            if (!canSeek) return KeyAction.PASS
+            if (!isKeyDown || isRepeat) return KeyAction.CONSUME
+            return if (key in seekForwardKeys) KeyAction.SEEK_FORWARD else KeyAction.SEEK_BACKWARD
+        }
         val ours = key in directional || key in media || key in channelKeys || key == Key.Menu
         if (!ours) return KeyAction.PASS
         // Media and channel keys mean the same thing whether or not the controls are up.
@@ -74,7 +87,7 @@ internal object LiveControlsPolicy {
                 else -> KeyAction.ZAP_BACK
             }
         }
-        if (key == Key.DirectionLeft && hasLineup && !controlsVisible) {
+        if (key == Key.DirectionLeft && hasLineup && !controlsVisible && !isReplay) {
             return if (isKeyDown && !isRepeat) KeyAction.OPEN_CHANNEL_LIST else KeyAction.CONSUME
         }
         if (controlsVisible && zapReveal && (key == Key.DirectionUp || key == Key.DirectionDown)) {
@@ -88,10 +101,12 @@ internal object LiveControlsPolicy {
         }
         if (!isKeyDown) return KeyAction.CONSUME
         return when (key) {
-            Key.DirectionUp -> KeyAction.ZAP_PREVIOUS
-            Key.DirectionDown -> KeyAction.ZAP_NEXT
+            Key.DirectionUp -> if (isReplay) KeyAction.SHOW_CONTROLS else KeyAction.ZAP_PREVIOUS
+            Key.DirectionDown -> if (isReplay) KeyAction.SHOW_CONTROLS else KeyAction.ZAP_NEXT
+            Key.DirectionRight -> if (canSeek) KeyAction.SEEK_FORWARD else KeyAction.SHOW_CONTROLS
+            Key.DirectionLeft -> if (canSeek) KeyAction.SEEK_BACKWARD else KeyAction.SHOW_CONTROLS
             Key.Menu -> if (isRepeat) KeyAction.CONSUME else KeyAction.OPEN_CHANNEL_MENU
-            // OK, LEFT, RIGHT: bring the controls up; never pause, never scrub.
+            // OK: bring the controls up; never pause, never scrub.
             else -> KeyAction.SHOW_CONTROLS
         }
     }
@@ -122,14 +137,21 @@ internal object LiveControlsPolicy {
     fun revealForTrouble(failed: Boolean, reconnecting: Boolean, controlsVisible: Boolean, panelOpen: Boolean): Boolean =
         (failed || reconnecting) && !controlsVisible && !panelOpen
 
-    enum class Status { LIVE, PAUSED, TUNING, RECONNECTING, FAILED }
+    enum class Status { LIVE, REPLAY, PAUSED, TUNING, RECONNECTING, FAILED }
 
     /** Tuning first (an error may still belong to the channel being left), then failure. */
-    fun status(tuning: Boolean, reconnecting: Boolean, paused: Boolean, failed: Boolean): Status = when {
+    fun status(
+        tuning: Boolean,
+        reconnecting: Boolean,
+        paused: Boolean,
+        failed: Boolean,
+        isReplay: Boolean = false,
+    ): Status = when {
         tuning -> Status.TUNING
         failed -> Status.FAILED
         reconnecting -> Status.RECONNECTING
         paused -> Status.PAUSED
+        isReplay -> Status.REPLAY
         else -> Status.LIVE
     }
 

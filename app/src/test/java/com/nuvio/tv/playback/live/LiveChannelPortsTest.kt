@@ -8,6 +8,7 @@ import com.nuvio.tv.playback.core.ProviderSelectionId
 import com.nuvio.tv.playback.core.ProviderSourceType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,17 +17,21 @@ class LiveChannelPortsTest {
     private val profile = PlaybackProfileId("profile-secret")
 
     @Test
-    fun `target requires LIVE and exact selection identity`() {
+    fun `target requires LIVE or CATCH_UP and exact selection identity`() {
         val live = selection(ContentType.LIVE)
+        val catchUp = selection(ContentType.CATCH_UP)
+        val vod = selection(ContentType.VOD)
         val wrongIdentity = runCatching {
             target(live, ProviderSelectionId("wrong-secret"))
         }.exceptionOrNull()
-        val catchUp = runCatching {
-            target(selection(ContentType.CATCH_UP), ProviderSelectionId("channel-secret"))
+        val vodRejected = runCatching {
+            target(vod, ProviderSelectionId("channel-secret"))
         }.exceptionOrNull()
 
         assertTrue(wrongIdentity is IllegalArgumentException)
-        assertTrue(catchUp is IllegalArgumentException)
+        assertTrue(vodRejected is IllegalArgumentException)
+        assertNotNull(target(live, ProviderSelectionId("channel-secret")))
+        assertNotNull(target(catchUp, ProviderSelectionId("channel-secret")))
     }
 
     @Test

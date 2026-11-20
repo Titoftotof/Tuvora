@@ -46,6 +46,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -124,7 +129,19 @@ internal fun BoxScope.LiveControlsOverlay(
     val audioPainter = rememberRawSvgPainter(R.raw.ic_player_audio_filled)
     val aspectPainter = rememberRawSvgPainter(R.raw.ic_player_aspect_ratio)
 
-    Box(Modifier.matchParentSize()) {
+    Box(
+        Modifier
+            .matchParentSize()
+            .onPreviewKeyEvent { event ->
+                if (event.key == Key.Back) {
+                    if (event.type == KeyEventType.KeyUp) {
+                        actions.onHide()
+                    }
+                    return@onPreviewKeyEvent true
+                }
+                false
+            }
+    ) {
         // The VOD player's scrims, same heights and alphas.
         Box(
             Modifier.fillMaxWidth().height(150.dp).align(Alignment.TopCenter)
@@ -314,6 +331,7 @@ internal fun BoxScope.LiveControlsOverlay(
 private fun LiveStatusBadge(status: LiveControlsPolicy.Status) {
     val (label, color) = when (status) {
         LiveControlsPolicy.Status.LIVE -> stringResource(R.string.iptv_guide_live) to NuvioTheme.colors.Primary
+        LiveControlsPolicy.Status.REPLAY -> "REPLAY" to NuvioTheme.colors.Primary
         LiveControlsPolicy.Status.PAUSED -> stringResource(R.string.iptv_guide_paused) to Color.White
         LiveControlsPolicy.Status.TUNING -> stringResource(R.string.iptv_guide_tuning) to Color.White
         LiveControlsPolicy.Status.RECONNECTING -> stringResource(R.string.clean_live_status_reconnecting) to Color.White
@@ -323,10 +341,10 @@ private fun LiveStatusBadge(status: LiveControlsPolicy.Status) {
         text = label.uppercase(),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.Bold,
-        color = if (status == LiveControlsPolicy.Status.LIVE) Color.Black else color,
+        color = if (status == LiveControlsPolicy.Status.LIVE || status == LiveControlsPolicy.Status.REPLAY) Color.Black else color,
         modifier = Modifier
             .clip(RoundedCornerShape(NuvioTheme.radii.xs))
-            .background(if (status == LiveControlsPolicy.Status.LIVE) color else Color.White.copy(alpha = 0.16f))
+            .background(if (status == LiveControlsPolicy.Status.LIVE || status == LiveControlsPolicy.Status.REPLAY) color else Color.White.copy(alpha = 0.16f))
             .padding(horizontal = NuvioTheme.spacing.sm, vertical = 2.dp),
     )
 }

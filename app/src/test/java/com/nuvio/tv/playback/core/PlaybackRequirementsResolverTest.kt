@@ -562,6 +562,23 @@ class PlaybackRequirementsResolverTest {
     }
 
     @Test
+    fun `catch-up keeps the existing HDMI mode in the guide and fullscreen`() = runTest {
+        val summary = requestSummary(contentType = ContentType.CATCH_UP)
+        val preferences = PlaybackPreferences(display = DisplayPreference(
+            frameRate = FrameRatePreference.ON_RATE_CHANGE,
+            resolutionMatching = true,
+        ))
+        for (profile in listOf(SessionProfile.GUIDE, SessionProfile.FULLSCREEN)) {
+            val resolved = resolve(input(summary = summary, profile = profile, preferences = preferences))
+            assertFalse(resolved.displayModeSwitchAllowed)
+            assertFalse(resolved.resolutionMatchingEnabled)
+            assertEquals(FrameRatePreference.OFF, resolved.frameRatePreference)
+            assertTrue(resolved.retainDisplayMode)
+            assertFalse(resolved.liveContent)
+        }
+    }
+
+    @Test
     fun `VOD keeps the stored frame-rate preference`() = runTest {
         val storedOff = PlaybackPreferences(display = DisplayPreference(frameRate = FrameRatePreference.OFF))
         val resolved = resolve(

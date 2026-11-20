@@ -14,6 +14,7 @@ import com.nuvio.tv.playback.core.PlaybackProgressEvidence
 import com.nuvio.tv.playback.core.PlaybackSnapshot
 import com.nuvio.tv.playback.core.PlaybackTrackId
 import com.nuvio.tv.playback.core.PlaybackState
+import com.nuvio.tv.playback.core.ProviderCatchUpWindow
 import com.nuvio.tv.playback.core.ProviderPlaybackSelection
 import com.nuvio.tv.playback.core.ProviderSelectionId
 import com.nuvio.tv.playback.core.ProviderSourceType
@@ -60,6 +61,92 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = android.app.Application::class)
 class CleanLiveGuidePlaybackViewModelTest {
+    @Test
+    fun `replay replaces pending direct tune and keeps its session when collapsed`() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val proceed = CompletableDeferred<Unit>()
+        val fixture = fixture(
+            ownerDispatcher = StandardTestDispatcher(testScheduler),
+            selectionBeforeResult = {
+                started.complete(Unit)
+                proceed.await()
+            },
+        )
+        val vm = fixture.viewModel
+        vm.attachGuide(fixture.initial.contentId, fixture.activity, fixture.lifecycle, fixture.owner)
+        started.await()
+        val replay = fixture.replaySelection()
+        vm.requestTuneCatchUp(replay, "Replay", null, fixture.activity, fixture.lifecycle, fixture.owner)
+        vm.requestPromote()
+        runCurrent()
+        proceed.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf(replay), fixture.firstHost.tuneTargets)
+        assertEquals(1, fixture.factory.calls)
+        assertEquals(listOf(SessionProfile.FULLSCREEN), fixture.firstHost.tuneProfiles)
+        val before = fixture.firstHost.snapshot.value.copy(positionMs = 42_000L)
+        fixture.firstHost.snapshotFlow.value = before
+        vm.requestCollapse()
+        advanceUntilIdle()
+        val ready = vm.state.value as CleanLiveGuidePlaybackState.Ready
+        assertEquals(replay, ready.target.selection)
+        assertEquals(SessionProfile.GUIDE, ready.sessionProfile)
+        assertEquals(SessionProfile.FULLSCREEN, ready.snapshot.profile)
+        assertEquals(before, fixture.firstHost.snapshot.value)
+        vm.requestPromote()
+        advanceUntilIdle()
+        assertEquals(before, fixture.firstHost.snapshot.value)
+        assertTrue(fixture.firstHost.profileChanges.isEmpty())
+        assertTrue(fixture.firstHost.zapSelections.isEmpty())
+        vm.releaseBeforeExit()
+    }
+
+    @Test
+    fun `replay reuses the direct host and seek commands respect position and bounds`() = runTest {
+        val fixture = fixture(ownerDispatcher = StandardTestDispatcher(testScheduler))
+        val vm = fixture.viewModel
+        val host = fixture.firstHost
+        vm.attach(fixture.initial.contentId, fixture.activity, fixture.lifecycle, fixture.owner)
+        host.snapshotFlow.value = host.snapshot.value.copy(seekable = true, positionMs = 30_000L)
+        vm.requestSeekBy(10_000L)
+        advanceUntilIdle()
+        assertTrue(host.seekPositions.isEmpty())
+
+        val replay = fixture.replaySelection()
+        vm.requestTuneCatchUp(replay, "Replay", null, fixture.activity, fixture.lifecycle, fixture.owner)
+        advanceUntilIdle()
+        assertEquals(listOf(replay), host.zapSelections)
+        assertEquals(1, fixture.factory.calls)
+
+        suspend fun seek(position: Long, delta: Long, seekable: Boolean = true) {
+            host.snapshotFlow.value = host.snapshot.value.copy(
+                positionMs = position, durationMs = 90_000L, seekable = seekable,
+            )
+            vm.requestSeekBy(delta)
+            advanceUntilIdle()
+        }
+
+        seek(30_000L, 10_000L)
+        seek(30_000L, -10_000L)
+        seek(5_000L, -10_000L)
+        seek(55_000L, 10_000L)
+        seek(30_000L, 10_000L, seekable = false)
+        assertEquals(listOf(40_000L, 20_000L, 0L, 60_000L), host.seekPositions)
+        vm.releaseBeforeExit()
+    }
+
+    private fun Fixture.replaySelection(): ProviderPlaybackSelection {
+        val live = initial.selection
+        return ProviderPlaybackSelection(
+            sourceType = live.sourceType,
+            accountId = live.accountId,
+            itemId = live.itemId,
+            contentKey = live.contentKey,
+            contentType = ContentType.CATCH_UP,
+            catchUpWindow = ProviderCatchUpWindow(1_700_000_000_000L, 1_700_000_060_000L),
+        )
+    }
     @Test
     fun `rejected selection clears pending fullscreen intent and preserves the current host`() = runTest {
         val fixture = fixture(ownerDispatcher = StandardTestDispatcher(testScheduler))
@@ -846,6 +933,12 @@ class CleanLiveGuidePlaybackViewModelTest {
 
         override suspend fun retry() {
             operations += "retry"
+        }
+
+        val seekPositions = mutableListOf<Long>()
+
+        override suspend fun seekTo(positionMs: Long) {
+            seekPositions += positionMs
         }
 
         override suspend fun changeProfile(profile: SessionProfile) {

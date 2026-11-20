@@ -13,9 +13,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.SavedStateHandle
 import com.nuvio.tv.ui.navigation.LiveSessionSavedState
 import com.nuvio.tv.core.profile.ProfileManager
+import com.nuvio.tv.playback.core.ContentType
 import com.nuvio.tv.playback.core.PlaybackProfileId
 import com.nuvio.tv.playback.core.PlaybackSnapshot
 import com.nuvio.tv.playback.core.PlaybackTrackId
+import com.nuvio.tv.playback.core.ProviderPlaybackSelection
 import com.nuvio.tv.playback.core.ProviderSelectionId
 import com.nuvio.tv.playback.core.SessionProfile
 import com.nuvio.tv.playback.core.VideoDimensions
@@ -539,6 +541,13 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
             rejectAfterRelease(currentHost, CleanLiveGuideFailure.PROFILE_CHANGED)
             return@withLock
         }
+        // A viewport change can replace the replay graph (for example MPV GPU to direct).
+        // Keep its engine requirements stable while Compose resizes the same surface.
+        if (activeTarget?.selection?.contentType == ContentType.CATCH_UP) {
+            sessionProfile = next
+            publishSnapshot(currentHost.snapshot.value)
+            return@withLock
+        }
         try {
             currentHost.changeProfile(next)
         } catch (cancelled: CancellationException) {
@@ -559,6 +568,66 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
     fun requestPause() = requestCommand { it.pause() }
     fun requestResume() = requestCommand { it.resume() }
     fun requestRetry() = requestCommand { it.retry() }
+    fun requestSeekBy(deltaMs: Long) = requestCommand { currentHost ->
+        val window = activeTarget?.selection?.catchUpWindow ?: return@requestCommand
+        val snapshot = currentHost.snapshot.value
+        if (!snapshot.seekable) return@requestCommand
+        val availableMs = (minOf(System.currentTimeMillis(), window.endEpochMs) - window.startEpochMs)
+            .coerceAtLeast(0L)
+        val endMs = minOf(snapshot.durationMs ?: availableMs, availableMs).coerceAtLeast(0L)
+        currentHost.seekTo((snapshot.positionMs + deltaMs).coerceIn(0L, endMs))
+    }
+
+    fun requestTuneCatchUp(
+        selection: ProviderPlaybackSelection,
+        title: String,
+        logo: String?,
+        activity: Activity,
+        lifecycle: Lifecycle,
+        surfaceOwner: FrameLayout,
+        previewViewport: VideoDimensions? = null,
+    ) {
+        if (releaseCompleted || clearedReleaseLoopStarted) return
+        require(selection.contentType == ContentType.CATCH_UP)
+        val contentId = selection.contentKey
+        mutablePendingSelection.value = contentId
+        launchContained(CleanLiveGuideFailure.TUNE_FAILED) {
+            try {
+                ownershipMutex.withLock {
+                    if (releaseCompleted || clearedReleaseLoopStarted) return@withLock
+                    val profile = boundProfileId ?: activeProfileIdOrReject() ?: return@withLock
+                    val currentHost = host
+                    if (!profileMatches(profile)) {
+                        if (currentHost != null) {
+                            rejectAfterRelease(currentHost, CleanLiveGuideFailure.PROFILE_CHANGED)
+                        }
+                        return@withLock
+                    }
+
+                    val target = LiveChannelTarget.sanitized(
+                        selection = selection,
+                        contentId = contentId,
+                        title = title,
+                        logo = logo,
+                        playlistVersion = null,
+                        boundProfileId = profile,
+                        titleKnown = true,
+                    )
+
+                    attachGeneration += 1
+                    pendingTuneContentId = null
+                    lastAttachInput = GuideAttachInput(activity, lifecycle, surfaceOwner, previewViewport)
+                    if (currentHost != null && attachedSurfaceOwner === surfaceOwner) {
+                        acceptTarget(currentHost, target, profile)
+                    } else if (releaseHostForSurfaceRebind()) {
+                        createAndTune(target, profile, activity, lifecycle, surfaceOwner, previewViewport)
+                    }
+                }
+            } finally {
+                finishSelection(contentId)
+            }
+        }
+    }
 
     /** F28: change the picture of the channel on screen (aspect cycle, zoom step, reset). */
     fun requestPictureChange(update: (PictureChoice) -> PictureChoice) {
@@ -644,7 +713,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
             return
         }
         val acceptedGeneration = try {
-            created.tune(target.selection, sessionProfile, mediaMetadata(target))
+            created.tune(target.selection, playbackProfile(target), mediaMetadata(target))
         } catch (cancelled: CancellationException) {
             releaseCreatedHost(created)
             throw cancelled
@@ -673,7 +742,7 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         presentationJob?.cancelAndJoin()
         presentationJob = null
         val acceptedGeneration = try {
-            currentHost.zap(target.selection, sessionProfile, mediaMetadata(target))
+            currentHost.zap(target.selection, playbackProfile(target), mediaMetadata(target))
         } catch (cancelled: CancellationException) {
             publishReady(currentHost)
             throw cancelled
@@ -914,6 +983,9 @@ internal class CleanLiveGuidePlaybackViewModel private constructor(
         mutableState.value = CleanLiveGuidePlaybackState.Released
         ownerJob.cancel()
     }
+
+    private fun playbackProfile(target: LiveChannelTarget): SessionProfile =
+        if (target.selection.contentType == ContentType.CATCH_UP) SessionProfile.FULLSCREEN else sessionProfile
 
     private fun mediaMetadata(target: LiveChannelTarget): CleanMediaSessionMetadata =
         CleanMediaSessionMetadata.fromIngress(

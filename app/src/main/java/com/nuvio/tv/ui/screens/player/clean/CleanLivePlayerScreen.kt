@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -164,6 +165,12 @@ internal fun CleanLivePlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
+                if (event.key == Key.Back && controlsVisible && panel == null) {
+                    if (event.type == KeyEventType.KeyUp) {
+                        hideControls()
+                    }
+                    return@onPreviewKeyEvent true
+                }
                 val proposed = LiveControlsPolicy.keyAction(
                     key = event.key,
                     isKeyDown = event.type == KeyEventType.KeyDown,
@@ -199,7 +206,9 @@ internal fun CleanLivePlayerScreen(
                     // No lineup history or hideable channel identity on this destination.
                     LiveControlsPolicy.KeyAction.ZAP_BACK,
                     LiveControlsPolicy.KeyAction.OPEN_CHANNEL_LIST,
-                    LiveControlsPolicy.KeyAction.OPEN_CHANNEL_MENU -> showControls()
+                    LiveControlsPolicy.KeyAction.OPEN_CHANNEL_MENU,
+                    LiveControlsPolicy.KeyAction.SEEK_FORWARD,
+                    LiveControlsPolicy.KeyAction.SEEK_BACKWARD -> showControls()
                 }
                 true
             },

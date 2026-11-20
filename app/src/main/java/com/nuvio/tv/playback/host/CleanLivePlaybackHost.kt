@@ -205,8 +205,8 @@ internal class CleanLivePlaybackHost private constructor(
     }
 
     private fun requireLive(selection: ProviderPlaybackSelection) {
-        require(selection.contentType == ContentType.LIVE) {
-            "Clean live playback host accepts live selections only"
+        require(selection.contentType == ContentType.LIVE || selection.contentType == ContentType.CATCH_UP) {
+            "Clean live playback host accepts live and catch-up selections only"
         }
     }
 

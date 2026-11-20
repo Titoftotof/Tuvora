@@ -43,6 +43,7 @@ internal interface CleanLiveHost {
     suspend fun pause()
     suspend fun resume()
     suspend fun retry()
+    suspend fun seekTo(positionMs: Long)
 
     /** F28: live track choices, the same session commands VOD uses. */
     suspend fun selectAudioTrack(trackId: PlaybackTrackId)
@@ -132,6 +133,7 @@ private class AndroidCleanLiveHost(
     override suspend fun pause() = host.pause()
     override suspend fun resume() = host.resume()
     override suspend fun retry() = host.retry()
+    override suspend fun seekTo(positionMs: Long) = host.seekTo(positionMs)
     override suspend fun selectAudioTrack(trackId: PlaybackTrackId) = host.selectAudioTrack(trackId)
     override suspend fun selectSubtitleTrack(trackId: PlaybackTrackId) = host.selectSubtitleTrack(trackId)
     override suspend fun disableSubtitles() = host.disableSubtitles()

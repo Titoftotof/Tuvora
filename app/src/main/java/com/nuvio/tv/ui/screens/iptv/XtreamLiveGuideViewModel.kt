@@ -111,7 +111,8 @@ data class ReplayLaunch(
     val contentId: String,
     val title: String,
     val programmeStartMs: Long,
-    val programmeEndMs: Long
+    val programmeEndMs: Long,
+    val originChannelContentId: String,
 )
 
 data class LiveGuideUiState(
@@ -1572,6 +1573,7 @@ class XtreamLiveGuideViewModel @Inject constructor(
                     title = "${channel.name} · ${programme.title}",
                     programmeStartMs = programme.startMs,
                     programmeEndMs = programme.endMs,
+                    originChannelContentId = channel.contentId,
                 )
             )
         }

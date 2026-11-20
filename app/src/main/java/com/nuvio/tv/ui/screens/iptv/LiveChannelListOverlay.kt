@@ -107,6 +107,10 @@ internal fun BoxScope.LiveChannelListOverlay(
                         true
                     }
                     Key.DirectionLeft -> true
+                    Key.Back -> {
+                        if (event.type == KeyEventType.KeyUp) latestClose()
+                        true
+                    }
                     else -> false
                 }
             }

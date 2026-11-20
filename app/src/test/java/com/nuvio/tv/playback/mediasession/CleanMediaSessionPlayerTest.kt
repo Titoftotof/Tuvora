@@ -142,7 +142,7 @@ class CleanMediaSessionPlayerTest {
     }
 
     @Test
-    fun `HDMI workaround only ignores Android pauses on Fire TV during live fullscreen switches`() {
+    fun `HDMI workaround only ignores Android pauses on Fire TV during live and replay fullscreen switches`() {
         val live = PlaybackSnapshot(
             requestSummary = liveSummary(),
             playWhenReady = true,
@@ -165,7 +165,10 @@ class CleanMediaSessionPlayerTest {
         assertFalse(ignores(snapshot = live.copy(playWhenReady = false)))
         assertFalse(ignores(snapshot = live.copy(profile = com.nuvio.tv.playback.core.SessionProfile.GUIDE)))
         assertFalse(ignores(snapshot = live.copy(requestSummary = liveSummary().copy(contentType = ContentType.VOD))))
-        assertFalse(ignores(snapshot = live.copy(requestSummary = liveSummary().copy(contentType = ContentType.CATCH_UP))))
+        val replay = live.copy(requestSummary = liveSummary().copy(contentType = ContentType.CATCH_UP))
+        assertTrue(ignores(snapshot = replay))
+        assertFalse(ignores(switching = false, snapshot = replay))
+        assertFalse(ignores(caller = null, uid = null, snapshot = replay))
     }
 
     @Test

@@ -9,7 +9,11 @@ import com.nuvio.tv.ui.components.player.VideoZoomDialog
 import com.nuvio.tv.ui.screens.player.clean.live.LiveAspectIndicator
 import androidx.activity.compose.BackHandler
 import android.widget.FrameLayout
+import com.nuvio.tv.playback.core.ContentType
+import com.nuvio.tv.playback.core.ProviderCatchUpWindow
+import com.nuvio.tv.playback.core.ProviderPlaybackSelection
 import com.nuvio.tv.playback.core.ProviderSelectionId
+import com.nuvio.tv.playback.core.ProviderSourceType
 import com.nuvio.tv.playback.core.VideoDimensions
 import com.nuvio.tv.playback.live.LiveZapDirection
 import com.nuvio.tv.playback.ui.LivePlaybackUiErrorCode
@@ -95,6 +99,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.Button
 import androidx.tv.material3.Icon
@@ -115,6 +122,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.CircularProgressIndicator
 import com.nuvio.tv.ui.theme.NuvioTheme
 import com.nuvio.tv.ui.screens.player.clean.CleanLivePlayerUiPolicy
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
@@ -239,16 +247,41 @@ fun LiveGuide(
     val timelineStripFocus = remember { FocusRequester() }
     // Shown only for the airing programme on an archive channel — the one state with two
     // reasonable destinations (see GuideCellIntent).
-    var sheetProgramme by remember { mutableStateOf<XtreamProgram?>(null) }
+    var startOverSelection by remember(account.id) { mutableStateOf<Pair<GuideChannel, XtreamProgram>?>(null) }
+    var replayCategoryId by remember(account.id) { mutableStateOf<String?>(null) }
     // F03: MENU on a favourite or a pinned channel: Move up / Move down / Remove or Hide.
     var channelMenuAsk by remember { mutableStateOf<Pair<GuideChannel, List<GuideChannelMenuPolicy.Action>>?>(null) }
     // F01: the channel-search keyboard dialog.
     var searchDialogOpen by remember { mutableStateOf(false) }
 
-    // Launch a replay in the full player, once.
+    // The replay player is a separate destination, so its return target must survive disposal.
+    var replayOriginChannelId by rememberSaveable(account.id) { mutableStateOf<String?>(null) }
+    var returningFromReplay by remember { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        returningFromReplay = replayOriginChannelId != null
+    }
+    LaunchedEffect(returningFromReplay, uiState.channels, uiState.channelsLoad) {
+        if (!returningFromReplay) return@LaunchedEffect
+        val origin = replayOriginChannelId ?: return@LaunchedEffect
+        val channel = uiState.channels.firstOrNull { it.contentId == origin }
+        val entityId = channel?.entityId?.takeIf { it.isNotBlank() }
+        if (entityId != null) {
+            pendingRestoreEntityId = entityId
+        } else if (uiState.channelsLoad == com.nuvio.tv.core.iptv.LoadStatus.Loaded ||
+            uiState.channelsLoad == com.nuvio.tv.core.iptv.LoadStatus.Empty
+        ) {
+            channelListFocus.requestFocusOrFalse()
+        } else {
+            return@LaunchedEffect
+        }
+        returningFromReplay = false
+        replayOriginChannelId = null
+    }
+
     val replayLaunch = uiState.replayLaunch
     LaunchedEffect(replayLaunch) {
         val launch = replayLaunch ?: return@LaunchedEffect
+        replayOriginChannelId = launch.originChannelContentId
         viewModel.consumeReplayLaunch()
         onPlayCatchUp(launch.url, launch.title, launch.contentId, launch.programmeStartMs, launch.programmeEndMs)
     }
@@ -278,7 +311,7 @@ fun LiveGuide(
     fun leaveTimelineToNow() {
         timelineChannelId = null
         inspectedProgramme = null
-        sheetProgramme = null
+        startOverSelection = null
         viewModel.resetWindowToLive()
         if (!requestFocusedChannel()) {
             firstChannelFocus.requestFocusOrFalse()
@@ -301,13 +334,13 @@ fun LiveGuide(
     LaunchedEffect(uiState.focusedChannelId) {
         if (timelineChannelId != null && timelineChannelId != uiState.focusedChannelId) {
             timelineChannelId = null
-            sheetProgramme = null
         }
     }
 
     val playbackState by playbackViewModel.state.collectAsStateWithLifecycle()
     val readyPlayback = playbackState as? CleanLiveGuidePlaybackState.Ready
     val playbackUi = readyPlayback?.presentation
+    val isReplayPlaying = readyPlayback?.target?.selection?.contentType == ContentType.CATCH_UP
     com.nuvio.tv.ui.screens.ambient.AmbientPlaybackEffect(
         active = fullscreen || playbackUi?.playWhenReady == true
     )
@@ -361,6 +394,33 @@ fun LiveGuide(
             GuidePlaybackInteractionPolicy.Click.RETRY -> playbackViewModel.requestRetry()
         }
     }
+    fun playReplayInGuide(channel: GuideChannel, programme: XtreamProgram) {
+        val catchUpSelection = ProviderPlaybackSelection(
+            sourceType = ProviderSourceType.XTREAM,
+            accountId = ProviderSelectionId(account.id),
+            itemId = ProviderSelectionId(channel.streamId.toString()),
+            contentKey = ProviderSelectionId(channel.contentId),
+            contentType = ContentType.CATCH_UP,
+            catchUpWindow = ProviderCatchUpWindow(
+                startEpochMs = programme.startMs,
+                endEpochMs = programme.endMs,
+            ),
+            providerConnectionLimit = 1,
+        )
+        val hostActivity = activity ?: return
+        requestedContentId = channel.contentId
+        replayCategoryId = uiState.selectedCategoryId
+        playbackViewModel.requestTuneCatchUp(
+            selection = catchUpSelection,
+            title = "${channel.name} · ${programme.title}",
+            logo = channel.logo,
+            activity = hostActivity,
+            lifecycle = lifecycleOwner.lifecycle,
+            surfaceOwner = surfaceOwner,
+            previewViewport = previewViewport,
+        )
+        onFullscreenChange(true)
+    }
     LaunchedEffect(playbackViewModel, account.id, activity, surfaceOwner) {
         val hostActivity = activity ?: return@LaunchedEffect
         val resuming = playbackViewModel.restoreGuide(
@@ -381,7 +441,10 @@ fun LiveGuide(
     }
 
     val okPressGate = remember { LiveOkPressGate() }
+    var backKeyDown by remember { mutableStateOf(false) }
     var backLongPressed by remember { mutableStateOf(false) }
+    var backPressJob by remember { mutableStateOf<Job?>(null) }
+    val guideCoroutineScope = rememberCoroutineScope()
     var controlsVisible by remember { mutableStateOf(false) }
     var controlsTick by remember { mutableStateOf(0) }
     // F08: the channel list over fullscreen video, and the previous channel for the LAST key.
@@ -402,20 +465,36 @@ fun LiveGuide(
         if (fullscreen) {
             browsingOrigin = uiState.focusedChannel?.entityId
             wasFullscreen = true
+            fullscreenAnchor.requestFocusOrFalse()
         } else if (wasFullscreen) {
             wasFullscreen = false
             channelListOpen = false
             restoreAfterFullscreen = true
         }
     }
-    LaunchedEffect(restoreAfterFullscreen, fullscreen, uiState.channels) {
-        if (restoreAfterFullscreen && !fullscreen && uiState.channels.isNotEmpty()) {
-            pendingRestoreEntityId = GuideFocusRestorePolicy.target(
-                playing = uiState.channels.firstOrNull { it.contentId == playingContentId }?.entityId,
-                origin = browsingOrigin,
-                visibleIds = uiState.channels.map { it.entityId })
-            restoreAfterFullscreen = false
+    LaunchedEffect(restoreAfterFullscreen, fullscreen, uiState.selectedCategoryId, uiState.channels, uiState.channelsLoad) {
+        if (!restoreAfterFullscreen || fullscreen) return@LaunchedEffect
+        val playing = uiState.channels.firstOrNull { it.contentId == playingContentId }
+        val replayCategory = replayCategoryId
+        if (isReplayPlaying && replayCategory != null &&
+            replayCategory != uiState.selectedCategoryId && uiState.categories.any { it.id == replayCategory }
+        ) {
+            viewModel.selectCategory(replayCategory)
+            return@LaunchedEffect
         }
+        if (uiState.channels.isEmpty() && uiState.channelsLoad is com.nuvio.tv.core.iptv.LoadStatus.Loading) {
+            return@LaunchedEffect
+        }
+        if (isReplayPlaying && playing != null) {
+            inCategory = true
+            viewModel.focusChannel(playing.contentId)
+        }
+        pendingRestoreEntityId = GuideFocusRestorePolicy.target(
+            playing = playing?.entityId,
+            origin = browsingOrigin,
+            visibleIds = uiState.channels.map { it.entityId },
+        )
+        restoreAfterFullscreen = false
     }
     var zapBack by remember(account.id) { mutableStateOf(LiveZapBack()) }
     LaunchedEffect(playingContentId) { playingContentId?.let { zapBack = zapBack.onSettled(it) } }
@@ -460,16 +539,18 @@ fun LiveGuide(
         if (fullscreen && controlsVisible && !livePanelOpen) controlsPrimaryFocus.requestFocusOrFalse()
     }
     LaunchedEffect(fullscreen) { if (!fullscreen) { controlsVisible = false; zapReveal = false; moreOpen = false; livePanel = null } }
-    // F28 BACK: the channel list and the pickers answer it themselves; then hide the controls; then
-    // back to the guide.
-    BackHandler(enabled = fullscreen) {
-        when (LiveControlsPolicy.backAction(panelOpen = false, controlsVisible = controlsVisible)) {
-            LiveControlsPolicy.BackAction.HIDE_CONTROLS -> hideControls()
-            else -> {
-                playbackViewModel.requestCollapse()
-                onFullscreenChange(false)
-            }
+    fun collapseFullscreen() {
+        if (isReplayPlaying) {
+            timelineChannelId = null
+            inspectedProgramme = null
+            restoreAfterFullscreen = true
         }
+        playbackViewModel.requestCollapse()
+        onFullscreenChange(false)
+    }
+
+    BackHandler(enabled = fullscreen && !livePanelOpen) {
+        if (controlsVisible && !isReplayPlaying) hideControls() else collapseFullscreen()
     }
 
     Box(
@@ -480,30 +561,66 @@ fun LiveGuide(
             // arrive there — intercept them in the preview phase before the row's clickable.
             // BACK is NOT consumed (BackHandler collapses). UP/DOWN zap channels.
             .onPreviewKeyEvent { event ->
-                if (!fullscreen) {
-                    val hasPlayback = readyPlayback != null || playingContentId != null || pendingContentId != null
-                    if (event.key == Key.Back) {
+                val hasPlayback = readyPlayback != null || playingContentId != null || pendingContentId != null
+                if (event.key == Key.Back) {
+                    if (startOverSelection != null) return@onPreviewKeyEvent false
+                    if (backLongPressed) {
+                        val newPress = event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0
+                        if (newPress || event.type == KeyEventType.KeyUp) {
+                            backLongPressed = false
+                            backKeyDown = false
+                            backPressJob?.cancel()
+                        }
+                        // The previous key-up may be lost when fullscreen takes focus.
+                        if (!newPress) return@onPreviewKeyEvent true
+                    }
+                    if (fullscreen && !livePanelOpen && (isReplayPlaying || controlsVisible)) {
+                        if (event.type == KeyEventType.KeyUp) {
+                            if (isReplayPlaying) collapseFullscreen() else hideControls()
+                        }
+                        return@onPreviewKeyEvent true
+                    }
+                    if (!fullscreen) {
                         if (event.type == KeyEventType.KeyDown) {
-                            val isLong = event.nativeKeyEvent.isLongPress || event.nativeKeyEvent.repeatCount >= 1
-                            if (GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(fullscreen, hasPlayback, isLong)) {
-                                if (!backLongPressed) {
-                                    backLongPressed = true
-                                    onFullscreenChange(true)
+                            val native = event.nativeKeyEvent
+                            val isRepeatOrLong = native.isLongPress || native.repeatCount >= 1
+                            if (isRepeatOrLong) {
+                                backPressJob?.cancel()
+                                if (GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnBack(fullscreen, hasPlayback, true)) {
+                                    if (!backLongPressed) {
+                                        backLongPressed = true
+                                        onFullscreenChange(true)
+                                    }
+                                    return@onPreviewKeyEvent true
                                 }
-                                return@onPreviewKeyEvent true
+                            } else if (!backKeyDown) {
+                                backKeyDown = true
+                                backLongPressed = false
+                                backPressJob?.cancel()
+                                if (hasPlayback) {
+                                    backPressJob = guideCoroutineScope.launch {
+                                        delay(400)
+                                        if (backKeyDown && !fullscreen) {
+                                            backLongPressed = true
+                                            onFullscreenChange(true)
+                                        }
+                                    }
+                                }
                             }
                         } else if (event.type == KeyEventType.KeyUp) {
+                            backKeyDown = false
+                            backPressJob?.cancel()
                             if (backLongPressed) {
                                 backLongPressed = false
                                 return@onPreviewKeyEvent true
                             }
                         }
-                    } else if (event.key == Key.MediaPlay || event.key == Key.MediaPlayPause) {
-                        if (event.type == KeyEventType.KeyDown &&
-                            GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(fullscreen, hasPlayback)) {
-                            onFullscreenChange(true)
-                            return@onPreviewKeyEvent true
-                        }
+                    }
+                } else if (!fullscreen && (event.key == Key.MediaPlay || event.key == Key.MediaPlayPause)) {
+                    if (event.type == KeyEventType.KeyDown &&
+                        GuidePlaybackInteractionPolicy.shouldReturnToFullscreenOnPlay(fullscreen, hasPlayback)) {
+                        onFullscreenChange(true)
+                        return@onPreviewKeyEvent true
                     }
                 }
                 // Observe the guide's press before promotion too: its remaining events must not
@@ -517,6 +634,8 @@ fun LiveGuide(
                     isRepeat = event.nativeKeyEvent.repeatCount > 0,
                     hasLineup = true,
                     zapReveal = zapReveal,
+                    isReplay = isReplayPlaying,
+                    canSeekReplay = readyPlayback?.snapshot?.seekable == true,
                 ) else LiveControlsPolicy.KeyAction.PASS
                 when (okPressGate.keyAction(event, fullscreen, proposed)) {
                     LiveControlsPolicy.KeyAction.PASS -> return@onPreviewKeyEvent false
@@ -529,6 +648,14 @@ fun LiveGuide(
                     LiveControlsPolicy.KeyAction.CONSUME -> Unit
                     LiveControlsPolicy.KeyAction.SHOW_CONTROLS -> { showControls(); zapReveal = false }
                     LiveControlsPolicy.KeyAction.TOGGLE_PAUSE -> { togglePause(); zapReveal = false }
+                    LiveControlsPolicy.KeyAction.SEEK_FORWARD -> {
+                        playbackViewModel.requestSeekBy(10_000L)
+                        showControls()
+                    }
+                    LiveControlsPolicy.KeyAction.SEEK_BACKWARD -> {
+                        playbackViewModel.requestSeekBy(-10_000L)
+                        showControls()
+                    }
                     // Menu opens labeled actions; entering it never changes the channel lineup.
                     LiveControlsPolicy.KeyAction.OPEN_CHANNEL_MENU -> uiState.focusedChannel?.let { channelMenuAsk = it to viewModel.channelMenu(it) }
                     LiveControlsPolicy.KeyAction.OPEN_CHANNEL_LIST -> { channelListOpen = true; controlsVisible = false; moreOpen = false }
@@ -590,7 +717,15 @@ fun LiveGuide(
                         rightFocus = channelListFocus,
                         // First category routes UP back to the active tab so the tabs stay reachable.
                         upFocus = if (index == 0) selectedTabRequester else null,
-                        onFocused = { viewModel.selectCategory(cat.id) },
+                        onFocused = {
+                            // A category can regain focus while the guide is being revealed.
+                            // Let the on-screen replay's row finish restoring first.
+                            if (!fullscreen && !restoreAfterFullscreen &&
+                                pendingRestoreEntityId == null && replayOriginChannelId == null
+                            ) {
+                                viewModel.selectCategory(cat.id)
+                            }
+                        },
                         // MENU hides a provider category. Shortcut visibility is managed in IPTV settings.
                         onMenu = if (cat.special == null) { { viewModel.hideCategory(cat) } } else null,
                         // F01: OK on "Search" opens the keyboard (focus alone never does).
@@ -697,15 +832,15 @@ fun LiveGuide(
                         itemsIndexed(uiState.channels.distinctBy { it.contentId }, key = { _, it -> it.contentId }) { index, ch ->
                             val isPlaying = ch.contentId == playingContentId
                             val isTimelineRow = timelineChannelId == ch.contentId
+                            val rowFocusRequester = remember(ch.entityId) { channelRowRequesters.getOrPut(ch.entityId) { FocusRequester() } }
                             GuideChannelRow(
-                                focusRequester = channelRowRequesters.getOrPut(ch.entityId) { FocusRequester() },
+                                focusRequester = rowFocusRequester,
                                 entryFocusRequester = if (index == 0) firstChannelFocus else null,
                                 clampUp = index == 0,
                                 upFocusRequester = if (awayFromNow && index == 0) returnToNowFocus else null,
                                 layout = guideLayout,
                                 number = index + 1,
                                 name = ch.name,
-                                // A play glyph icon marks what the preview player is tuned to.
                                 isPlaying = isPlaying,
                                 logo = ch.logo,
                                 epg = uiState.epg[ch.streamId],
@@ -768,8 +903,8 @@ fun LiveGuide(
                                     when (GuideCellIntent.forAction(
                                         guideActionFor(programme, ch, nowMs, uiState.catchUpSupported)
                                     )) {
-                                        GuideCellIntent.Intent.REPLAY -> viewModel.startReplay(ch, programme)
-                                        GuideCellIntent.Intent.OPEN_SHEET -> sheetProgramme = programme
+                                        GuideCellIntent.Intent.REPLAY -> playReplayInGuide(ch, programme)
+                                        GuideCellIntent.Intent.OPEN_SHEET -> startOverSelection = ch to programme
                                         GuideCellIntent.Intent.PLAY_LIVE -> selectChannel(ch.contentId)
                                         GuideCellIntent.Intent.NONE -> Unit
                                     }
@@ -850,16 +985,31 @@ fun LiveGuide(
                         channelName = overlayChannel?.name.orEmpty(),
                         logoUrl = overlayChannel?.logo,
                         reserveLogoSlot = true,
-                        nowTitle = overlayEpg?.now?.let { "${timeRange(it)}  ${it.title}" },
-                        nowStartMs = overlayEpg?.now?.startMs,
-                        nowEndMs = overlayEpg?.now?.endMs,
-                        nextLine = overlayEpg?.next?.let { stringResource(R.string.iptv_guide_next_programme, timeRange(it), it.title) },
+                        nowTitle = if (isReplayPlaying) {
+                            readyPlayback?.target?.title
+                        } else {
+                            overlayEpg?.now?.let { "${timeRange(it)}  ${it.title}" }
+                        },
+                        nowStartMs = if (isReplayPlaying) {
+                            readyPlayback?.target?.selection?.catchUpWindow?.startEpochMs
+                        } else {
+                            overlayEpg?.now?.startMs
+                        },
+                        nowEndMs = if (isReplayPlaying) {
+                            readyPlayback?.target?.selection?.catchUpWindow?.endEpochMs
+                        } else {
+                            overlayEpg?.now?.endMs
+                        },
+                        nextLine = if (isReplayPlaying) null else {
+                            overlayEpg?.next?.let { stringResource(R.string.iptv_guide_next_programme, timeRange(it), it.title) }
+                        },
                         status = LiveControlsPolicy.status(
                             tuning = tuningNow,
                             reconnecting = status == LivePlaybackUiStatusCode.RECONNECTING ||
                                 status == LivePlaybackUiStatusCode.RECOVERING,
                             paused = playbackUi?.isPaused == true,
                             failed = errorText != null,
+                            isReplay = isReplayPlaying,
                         ),
                         errorText = errorText,
                     ),
@@ -871,13 +1021,17 @@ fun LiveGuide(
                     primaryFocus = controlsPrimaryFocus,
                     actions = LiveOverlayActions(
                         onPlayPause = { togglePause() },
-                        onZapPrevious = {
-                            viewModel.moveChannelFocus(LiveZapDirection.PREVIOUS)?.let(playbackViewModel::requestSettledTune)
-                            controlsTick++
+                        onZapPrevious = if (isReplayPlaying) null else {
+                            {
+                                viewModel.moveChannelFocus(LiveZapDirection.PREVIOUS)?.let(playbackViewModel::requestSettledTune)
+                                controlsTick++
+                            }
                         },
-                        onZapNext = {
-                            viewModel.moveChannelFocus(LiveZapDirection.NEXT)?.let(playbackViewModel::requestSettledTune)
-                            controlsTick++
+                        onZapNext = if (isReplayPlaying) null else {
+                            {
+                                viewModel.moveChannelFocus(LiveZapDirection.NEXT)?.let(playbackViewModel::requestSettledTune)
+                                controlsTick++
+                            }
                         },
                         onRetry = { playbackViewModel.requestRetry(); controlsTick++ },
                         onSubtitles = { livePanel = LivePanel.SUBTITLES },
@@ -973,18 +1127,22 @@ fun LiveGuide(
         }
 
         // START_OVER is the only state with two destinations, so it is the only one that asks.
-        val sheet = sheetProgramme
-        val sheetChannel = uiState.focusedChannel
-        if (sheet != null && sheetChannel != null && !fullscreen) {
+        val startOver = startOverSelection
+        if (startOver != null && !fullscreen) {
+            val (sheetChannel, sheet) = startOver
+            BackHandler {
+                startOverSelection = null
+                leadingCellFocus.requestFocusOrFalse() || requestFocusedChannel()
+            }
             GuideStartOverSheet(
                 channelName = sheetChannel.name,
                 programme = sheet,
                 onStartOver = {
-                    sheetProgramme = null
-                    viewModel.startReplay(sheetChannel, sheet)
+                    startOverSelection = null
+                    playReplayInGuide(sheetChannel, sheet)
                 },
                 onWatchLive = {
-                    sheetProgramme = null
+                    startOverSelection = null
                     commitPreview(sheetChannel.contentId)
                 },
             )

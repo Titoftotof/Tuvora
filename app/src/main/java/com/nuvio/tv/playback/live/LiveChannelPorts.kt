@@ -58,7 +58,9 @@ class LiveChannelTarget private constructor(
     val titleKnown: Boolean = true,
 ) {
     init {
-        require(selection.contentType == ContentType.LIVE) { "Live channel target must be LIVE" }
+        require(selection.contentType == ContentType.LIVE || selection.contentType == ContentType.CATCH_UP) {
+            "Live channel target must be LIVE or CATCH_UP"
+        }
         require(selection.contentKey == contentId) { "Live target identity must match its selection" }
         require(title.isNotBlank()) { "Live target title must not be blank" }
         require(playlistVersion == null || playlistVersion > 0) {

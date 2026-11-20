@@ -16,7 +16,7 @@ class CleanLiveGuideCutoverArchitectureTest {
     @Test
     fun `guide screen owns one stable surface and sends identities to the clean owner`() {
         assertTrue(screen.contains("remember(context) { FrameLayout(context) }"))
-        assertTrue(screen.contains("AndroidView(factory = { surfaceOwner }"))
+        assertTrue(squash(screen).contains("GuideVideoSurface(owner=surfaceOwner,"))
         assertTrue(screen.contains("VideoDimensions(width = heightPx * 16 / 9, height = heightPx)"))
         assertTrue(screen.contains("previewViewport = previewViewport"))
         assertTrue(screen.contains("playbackViewModel.attachGuide("))

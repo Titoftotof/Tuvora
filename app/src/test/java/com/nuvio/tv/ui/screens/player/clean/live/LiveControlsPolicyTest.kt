@@ -26,6 +26,24 @@ class LiveControlsPolicyTest {
     ) = LiveControlsPolicy.keyAction(key, down, visible, paused, panel)
 
     @Test
+    fun `seek keys target seekable replay and visible controls retain the D-pad`() {
+        fun replayKey(key: Key, visible: Boolean, seekable: Boolean = true) =
+            LiveControlsPolicy.keyAction(
+                key, true, visible, paused = false, panelOpen = false,
+                isReplay = true, canSeekReplay = seekable,
+            )
+
+        assertEquals(KeyAction.SEEK_FORWARD, replayKey(Key.DirectionRight, visible = false))
+        assertEquals(KeyAction.SEEK_BACKWARD, replayKey(Key.DirectionLeft, visible = false))
+        assertEquals(KeyAction.PASS_AND_KEEP_ALIVE, replayKey(Key.DirectionLeft, visible = true))
+        assertEquals(KeyAction.SEEK_FORWARD, replayKey(Key.MediaFastForward, visible = true))
+        assertEquals(KeyAction.SEEK_BACKWARD, replayKey(Key.MediaRewind, visible = true))
+        assertEquals(KeyAction.PASS, replayKey(Key.MediaRewind, visible = true, seekable = false))
+        assertEquals(KeyAction.PASS, key(Key.MediaFastForward))
+        assertEquals(KeyAction.PASS, key(Key.MediaRewind))
+    }
+
+    @Test
     fun `OK with the controls hidden shows them and never pauses`() {
         assertEquals("ok", KeyAction.SHOW_CONTROLS, key(Key.DirectionCenter))
         assertEquals("enter", KeyAction.SHOW_CONTROLS, key(Key.Enter))
