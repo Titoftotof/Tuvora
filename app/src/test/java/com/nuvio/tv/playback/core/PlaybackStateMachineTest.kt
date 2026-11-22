@@ -621,12 +621,16 @@ class PlaybackStateMachineTest {
     }
 
     @Test
-    fun `deterministic live reconnect failure can escalate into the one handoff`() {
+    fun `spent Media3 network reconnect budget can escalate into the one handoff`() {
         val reconnecting = PlaybackStateMachine.reduce(
             playingState(ContentType.LIVE),
             PlaybackEvent.PlaybackEnded(1, PlaybackEndReason.EOF),
         ).state
-        val handoffFailure = failure(Retryability.HANDOFF_ELIGIBLE).copy(deterministic = true)
+        val networkFailure = failure(Retryability.RETRYABLE_WITH_FRESH_REQUEST).copy(
+            code = FailureCode.NETWORK_TIMEOUT,
+            domain = FailureDomain.NETWORK,
+        )
+        val handoffFailure = PlaybackPolicy().liveReconnectExhaustedFailure(networkFailure, EngineType.MEDIA3)
 
         val escalated = PlaybackStateMachine.reduce(
             reconnecting,

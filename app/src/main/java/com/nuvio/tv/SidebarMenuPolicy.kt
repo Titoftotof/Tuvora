@@ -1,6 +1,7 @@
 package com.nuvio.tv
 
 import com.nuvio.tv.domain.model.DiscoverLocation
+import com.nuvio.tv.domain.model.IptvSidebarMode
 import com.nuvio.tv.domain.model.SidebarDestination
 
 /**
@@ -18,6 +19,13 @@ val SIDEBAR_USER_CONTROLLED_ORDER: List<SidebarDestination> = listOf(
     SidebarDestination.LIBRARY,
     SidebarDestination.IPTV,
     SidebarDestination.SPORTS
+)
+
+/** Top-level IPTV destinations substituted in place of [SidebarDestination.IPTV] in split mode. */
+val SIDEBAR_IPTV_SPLIT_DESTINATIONS: List<SidebarDestination> = listOf(
+    SidebarDestination.IPTV_LIVE,
+    SidebarDestination.IPTV_MOVIES,
+    SidebarDestination.IPTV_SERIES
 )
 
 /** Entries pinned after the user-controlled ones. */
@@ -46,17 +54,32 @@ fun sanitizeHiddenSidebarDestinations(
 /**
  * Full ordered list of destinations for the current profile, already filtered.
  *
- * Order: [SIDEBAR_USER_CONTROLLED_ORDER], then Discover (only when it lives in the sidebar itself),
- * then [SIDEBAR_ALWAYS_VISIBLE]. Every entry except Settings can be hidden, but Settings is kept even
- * when the viewer hides it, so the settings screen that restores the entries never becomes unreachable.
+ * Order: [SIDEBAR_USER_CONTROLLED_ORDER] (with [SidebarDestination.IPTV] expanded to
+ * [SIDEBAR_IPTV_SPLIT_DESTINATIONS] when [iptvSidebarMode] is [IptvSidebarMode.SPLIT]), then
+ * Discover (only when it lives in the sidebar itself), then [SIDEBAR_ALWAYS_VISIBLE]. Every entry
+ * except Settings can be hidden, but Settings is kept even when the viewer hides it, so the
+ * settings screen that restores the entries never becomes unreachable.
  */
 fun visibleSidebarDestinations(
     hidden: Collection<SidebarDestination>,
-    discoverLocation: DiscoverLocation
+    discoverLocation: DiscoverLocation,
+    iptvSidebarMode: IptvSidebarMode = IptvSidebarMode.HUB
 ): List<SidebarDestination> {
     val sanitized = sanitizeHiddenSidebarDestinations(hidden)
     val ordered = buildList {
-        addAll(SIDEBAR_USER_CONTROLLED_ORDER)
+        for (destination in SIDEBAR_USER_CONTROLLED_ORDER) {
+            if (destination == SidebarDestination.IPTV) {
+                if (SidebarDestination.IPTV !in sanitized) {
+                    if (iptvSidebarMode == IptvSidebarMode.SPLIT) {
+                        addAll(SIDEBAR_IPTV_SPLIT_DESTINATIONS)
+                    } else {
+                        add(SidebarDestination.IPTV)
+                    }
+                }
+            } else {
+                add(destination)
+            }
+        }
         if (discoverLocation == DiscoverLocation.IN_SIDEBAR) add(SidebarDestination.DISCOVER)
         addAll(SIDEBAR_ALWAYS_VISIBLE)
     }
@@ -85,7 +108,35 @@ fun sidebarRouteOf(destination: SidebarDestination): String = when (destination)
     SidebarDestination.SEARCH -> "search"
     SidebarDestination.LIBRARY -> "library"
     SidebarDestination.IPTV -> "xtream_hub"
+    SidebarDestination.IPTV_LIVE -> "iptv_live"
+    SidebarDestination.IPTV_MOVIES -> "iptv_movies"
+    SidebarDestination.IPTV_SERIES -> "iptv_series"
     SidebarDestination.SPORTS -> "sports_hub"
     SidebarDestination.DISCOVER -> "discover"
     SidebarDestination.SETTINGS -> "settings"
+}
+
+/**
+ * Resolves the initial navigation start destination once onboarding/profile checks are complete.
+ *
+ * When [startOnLiveTv] is enabled and IPTV is visible in the sidebar, opens Live TV directly
+ * (`iptv_live` in [IptvSidebarMode.SPLIT] mode, or `xtream_hub` in [IptvSidebarMode.HUB] mode).
+ */
+fun resolveInitialStartDestination(
+    needsExperienceSelection: Boolean,
+    layoutChosen: Boolean,
+    startOnLiveTv: Boolean,
+    hiddenSidebarDestinations: Collection<SidebarDestination>,
+    iptvSidebarMode: IptvSidebarMode = IptvSidebarMode.HUB,
+    experienceSelectionRoute: String = "experience_mode_selection",
+    layoutSelectionRoute: String = "layout_selection"
+): String = when {
+    needsExperienceSelection -> experienceSelectionRoute
+    !layoutChosen -> layoutSelectionRoute
+    startOnLiveTv && SidebarDestination.IPTV !in sanitizeHiddenSidebarDestinations(hiddenSidebarDestinations) ->
+        when (iptvSidebarMode) {
+            IptvSidebarMode.SPLIT -> sidebarRouteOf(SidebarDestination.IPTV_LIVE)
+            IptvSidebarMode.HUB -> sidebarRouteOf(SidebarDestination.IPTV)
+        }
+    else -> sidebarRouteOf(SidebarDestination.HOME)
 }

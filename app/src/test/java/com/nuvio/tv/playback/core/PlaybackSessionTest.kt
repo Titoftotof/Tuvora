@@ -1245,6 +1245,47 @@ class PlaybackSessionTest {
     }
 
     @Test
+    fun `spent Media3 network reconnects start libmpv at most once`() = runTest {
+        for (fallbackEnabled in listOf(true, false)) {
+            val networkFailure = PlaybackFailure(
+                FailureCode.NETWORK_TIMEOUT,
+                FailureDomain.NETWORK,
+                FailurePhase.RECOVERY,
+                Retryability.RETRYABLE_WITH_FRESH_REQUEST,
+            )
+            val media3 = FakeEngine(type = EngineType.MEDIA3) { start, input, events ->
+                if (start > 1) events.emit(PlaybackEvent.Failed(input.generation, networkFailure))
+            }
+            val mpv = FakeEngine(type = EngineType.LIBMPV) { _, input, events ->
+                events.emit(PlaybackEvent.FirstVideoFrame(input.generation))
+            }
+            val eligibleEngines = if (fallbackEnabled) {
+                setOf(EngineType.MEDIA3, EngineType.LIBMPV)
+            } else {
+                setOf(EngineType.MEDIA3)
+            }
+            val session = session(
+                engine = media3,
+                otherEngine = mpv,
+                requirementsResolver = PlaybackRequirementsResolver {
+                    PlaybackResult.Success(requirements(eligibleEngines))
+                },
+            )
+            session.dispatch(PlaybackCommand.SurfaceAvailable)
+            session.dispatch(PlaybackCommand.Tune(liveRequest, SessionProfile.FULLSCREEN))
+            advanceUntilIdle()
+            media3.emit(PlaybackEvent.FirstVideoFrame(1))
+            advanceUntilIdle()
+            media3.emit(PlaybackEvent.PlaybackEnded(1, PlaybackEndReason.EOF))
+            advanceUntilIdle()
+
+            assertEquals(if (fallbackEnabled) 1 else 0, mpv.startCalls)
+            assertEquals(if (fallbackEnabled) PlaybackState.PLAYING else PlaybackState.FAILED, session.snapshot.value.state)
+            close(session)
+        }
+    }
+
+    @Test
     fun `rapid frame death incidents exhaust rolling reconnect pressure`() = runTest {
         val engine = FakeEngine { start, input, events ->
             if (start > 1) events.emit(PlaybackEvent.FirstVideoFrame(input.generation))

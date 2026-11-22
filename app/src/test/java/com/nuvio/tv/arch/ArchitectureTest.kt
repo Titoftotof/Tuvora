@@ -38,7 +38,7 @@ class ArchitectureTest {
             // The scope is the canonical source root for this Gradle invocation. It therefore
             // includes this checkout when it is under .../wt/<lane>, without scanning sibling or
             // nested worktrees at all.
-            .map { (file, text) -> file.path to text }
+            .map { (file, text) -> file.invariantSeparatorsPath to text }
 
     // Fork side = upstream-absent paths, not a directory-naming convention.
     private val forkPaths = listOf(

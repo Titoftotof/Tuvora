@@ -124,6 +124,8 @@ class XtreamHubBoundedLoadTest {
             every { posterCardHeightDp } returns flowOf(189)
             every { posterCardCornerRadiusDp } returns flowOf(12)
             every { posterLabelsEnabled } returns flowOf(true)
+            every { homeImdbRatingsVisibility } returns flowOf(com.nuvio.tv.domain.model.HomeImdbRatingsVisibility.SHOW_ALL)
+            every { iptvStartOnLiveTv } returns flowOf(false)
         }
         val context = mockk<Context>(relaxed = true) { every { getString(any()) } returns "unreachable" }
         return XtreamHubViewModel(
@@ -141,6 +143,7 @@ class XtreamHubBoundedLoadTest {
             layoutPreferenceDataStore = layout,
             context = context,
             resolver = mockk(relaxed = true),
+            savedStateHandle = androidx.lifecycle.SavedStateHandle(),
         )
     }
 

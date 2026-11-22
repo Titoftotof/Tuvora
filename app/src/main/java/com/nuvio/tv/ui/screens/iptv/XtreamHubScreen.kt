@@ -107,10 +107,22 @@ fun XtreamHubScreen(
     /** Opens a catch-up replay in the full player — see LiveGuide's parameter of the same name. */
     onPlayCatchUp: (url: String, title: String, contentId: String, startMs: Long, endMs: Long) -> Unit =
         { _, _, _, _, _ -> },
+    /** When non-null (TiviMate split sidebar mode), locks this screen to one section and hides tabs. */
+    fixedSection: XtreamSection? = null,
+    hideBuiltInHeaders: Boolean = false,
     viewModel: XtreamHubViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showAccountPicker by remember { mutableStateOf(false) }
+    // Debounce focus-driven section switches in tabbed hub mode so passing over a tab toward the
+    // provider picker does not trigger an unintended category reload.
+    var pendingFocusSection by remember { mutableStateOf<XtreamSection?>(null) }
+    LaunchedEffect(pendingFocusSection, fixedSection) {
+        val target = pendingFocusSection ?: return@LaunchedEffect
+        if (fixedSection != null) return@LaunchedEffect
+        kotlinx.coroutines.delay(220L)
+        if (uiState.section != target) viewModel.selectSection(target)
+    }
     // B10: the Live guide's preview player expanded to fullscreen — hide the header row so the
     // video really covers the whole screen. Focus is locked inside the guide while true.
     var liveFullscreen by rememberSaveable { mutableStateOf(false) }
@@ -128,6 +140,23 @@ fun XtreamHubScreen(
     }
     var openCategoryId by remember(uiState.selectedAccountId, uiState.section) { mutableStateOf<String?>(null) }
     val firstFocus = remember { FocusRequester() }
+    val sectionContentFocus = remember { FocusRequester() }
+    val isSidebarExpanded = com.nuvio.tv.LocalSidebarExpanded.current
+    val onOpenSidebar = com.nuvio.tv.LocalOpenSidebar.current
+
+    // Root IPTV BackHandler: sits inside the NavHost destination so it takes priority over
+    // NavHost's internal PredictiveBackHandler, while still yielding to inner screen handlers
+    // (fullscreen live video, channel overlay, timeline travel, collapsed categories/grid).
+    // Once back at the top level of TV / Films / Series / IPTV Hub, BACK opens the left sidebar.
+    BackHandler(
+        enabled = !liveFullscreen &&
+            openCategoryId == null &&
+            !showAccountPicker &&
+            !isSidebarExpanded &&
+            onOpenSidebar != null
+    ) {
+        onOpenSidebar?.invoke()
+    }
 
     // Per-tab focus targets so D-pad UP from the first content row lands back on the
     // active tab, and focusRestorer restores focus to it when returning to the header.
@@ -139,14 +168,23 @@ fun XtreamHubScreen(
     val showLive = account?.typeEnabled(XtreamAccount.TYPE_LIVE) != false
     val showMovies = account?.typeEnabled(XtreamAccount.TYPE_MOVIES) != false
     val showSeries = account?.typeEnabled(XtreamAccount.TYPE_SERIES) != false
-    val anyTypeEnabled = showLive || showMovies || showSeries
-    val selectedTabRequester = when (uiState.section) {
-        XtreamSection.LIVE -> liveTab
-        XtreamSection.MOVIES -> moviesTab
-        XtreamSection.SERIES -> seriesTab
+    val activeSectionEnabled = when (fixedSection) {
+        XtreamSection.LIVE -> showLive
+        XtreamSection.MOVIES -> showMovies
+        XtreamSection.SERIES -> showSeries
+        null -> showLive || showMovies || showSeries
     }
-    // With every type disabled no tab requester is attached — restore focus to the account chip.
-    val headerRestoreTarget = if (anyTypeEnabled) selectedTabRequester else firstFocus
+    val selectedTabRequester = if (fixedSection != null) {
+        firstFocus
+    } else {
+        when (uiState.section) {
+            XtreamSection.LIVE -> liveTab
+            XtreamSection.MOVIES -> moviesTab
+            XtreamSection.SERIES -> seriesTab
+        }
+    }
+    // With every type disabled (or in split mode) no tab requester is attached — restore focus to the account chip.
+    val headerRestoreTarget = if (fixedSection == null && activeSectionEnabled) selectedTabRequester else firstFocus
 
     // Movies/Series tile -> native detail. (Live is handled by the TiViMate guide below.)
     val onActivate: (XtreamHubItem) -> Unit = { hit ->
@@ -198,42 +236,62 @@ fun XtreamHubScreen(
         return
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(top = if (liveFullscreen) 0.dp else NuvioTheme.spacing.xl)) {
-        // Header: section tabs lead, provider picker sits out on the right.
-        //
-        // The provider chip is NOT a section — it selects data, not a destination. Sitting first
-        // in the row, in identical clothing, it read as a fourth tab and put a data control in
-        // front of the navigation. Out on the right it stays one press away without competing,
-        // and LEFT from the first tab now leaves the header for the sidebar, which is how every
-        // other screen behaves.
-        if (!liveFullscreen) Row(
+    val accountDisplayName = uiState.selectedAccount?.name
+        ?.let(com.nuvio.tv.core.iptv.PlaylistDisplayPolicy::displayName)
+        ?: stringResource(R.string.iptv_hub_account_fallback)
+    // In split TiviMate sidebar mode (fixedSection != null), the Live Guide and TiviMateVodBrowser
+    // each provide full-bleed layout with an integrated playlist switcher in their left panel,
+    // saving ~68dp of vertical space for channels & posters.
+    val showTopHeader = !liveFullscreen && fixedSection == null
+    val canMoveDownToCategories = uiState.section == XtreamSection.LIVE || uiState.categories.isNotEmpty()
+    val tabDownFocus = if (canMoveDownToCategories) sectionContentFocus else null
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (liveFullscreen) Color.Black else TiviMateStyle.Background)
+            .padding(top = if (showTopHeader) NuvioTheme.spacing.md else 0.dp),
+    ) {
+        if (showTopHeader) Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = HubRowStartPadding, end = HubRowStartPadding, bottom = NuvioTheme.spacing.md)
+                .padding(start = HubRowStartPadding, end = HubRowStartPadding, bottom = NuvioTheme.spacing.sm)
                 .focusRestorer(headerRestoreTarget),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
         ) {
             if (showLive) HubChip(stringResource(R.string.iptv_hub_tab_live), uiState.section == XtreamSection.LIVE, focusRequester = liveTab,
-                onFocusSelect = { if (uiState.section != XtreamSection.LIVE) viewModel.selectSection(XtreamSection.LIVE) }) { viewModel.selectSection(XtreamSection.LIVE) }
+                downFocusRequester = tabDownFocus,
+                onFocusSelect = { pendingFocusSection = XtreamSection.LIVE }) {
+                pendingFocusSection = null
+                viewModel.selectSection(XtreamSection.LIVE)
+            }
             if (showMovies) HubChip(stringResource(R.string.type_movies), uiState.section == XtreamSection.MOVIES, focusRequester = moviesTab,
-                onFocusSelect = { if (uiState.section != XtreamSection.MOVIES) viewModel.selectSection(XtreamSection.MOVIES) }) { viewModel.selectSection(XtreamSection.MOVIES) }
+                downFocusRequester = tabDownFocus,
+                onFocusSelect = { pendingFocusSection = XtreamSection.MOVIES }) {
+                pendingFocusSection = null
+                viewModel.selectSection(XtreamSection.MOVIES)
+            }
             if (showSeries) HubChip(stringResource(R.string.type_series), uiState.section == XtreamSection.SERIES, focusRequester = seriesTab,
-                onFocusSelect = { if (uiState.section != XtreamSection.SERIES) viewModel.selectSection(XtreamSection.SERIES) }) { viewModel.selectSection(XtreamSection.SERIES) }
+                downFocusRequester = tabDownFocus,
+                onFocusSelect = { pendingFocusSection = XtreamSection.SERIES }) {
+                pendingFocusSection = null
+                viewModel.selectSection(XtreamSection.SERIES)
+            }
             Spacer(Modifier.weight(1f))
             HubChip(
-                label = uiState.selectedAccount?.name?.let(com.nuvio.tv.core.iptv.PlaylistDisplayPolicy::displayName) ?: stringResource(R.string.iptv_hub_account_fallback),
+                label = accountDisplayName,
                 selected = false,
                 focusRequester = firstFocus,
+                downFocusRequester = tabDownFocus,
                 showDropdownIcon = true,
                 onClick = { showAccountPicker = true }
             )
         }
 
-        // Live TV = TiViMate-style guide (category col + live preview + EPG channel list).
-        // Movies/Series = native poster rows.
+        // Live TV = TiviMate-style EPG guide; Movies/Series = TiviMate-style category + poster grid.
         val liveAccount = uiState.selectedAccount
-        if (!anyTypeEnabled) {
+        if (!activeSectionEnabled) {
             EmptyScreenState(
                 title = stringResource(R.string.iptv_hub_types_hidden_title),
                 subtitle = stringResource(R.string.iptv_hub_types_hidden_subtitle),
@@ -244,21 +302,30 @@ fun XtreamHubScreen(
                 account = liveAccount,
                 fullscreen = liveFullscreen,
                 onFullscreenChange = { liveFullscreen = it },
-                selectedTabRequester = selectedTabRequester,
+                selectedTabRequester = if (showTopHeader) selectedTabRequester else null,
                 onPlayCatchUp = onPlayCatchUp,
                 onSwitchAccount = viewModel::selectAccount,
+                accountName = accountDisplayName,
+                showAccountHeader = !showTopHeader,
+                onOpenAccountPicker = { showAccountPicker = true },
+                autoFocusCategories = !showTopHeader,
+                externalCategoryFocus = if (showTopHeader) sectionContentFocus else null,
             )
         } else {
-            HubBrowseContent(
+            TiviMateVodBrowser(
                 uiState = uiState,
+                accountName = accountDisplayName,
+                showAccountHeader = !showTopHeader,
+                onOpenAccountPicker = { showAccountPicker = true },
                 onActivate = onActivate,
                 onRetry = viewModel::retry,
                 onLoadCategory = viewModel::loadCategory,
                 onRetryCategory = viewModel::retryCategory,
                 onPrefetchCategory = viewModel::prefetchCategory,
                 onLoadMoreCategory = viewModel::loadMoreCategory,
-                onOpenCategory = { openCategoryId = it },
-                selectedTabRequester = selectedTabRequester
+                topUpFocusRequester = if (showTopHeader) selectedTabRequester else null,
+                autoFocusCategories = !showTopHeader,
+                categoryListFocusRequester = if (showTopHeader) sectionContentFocus else null,
             )
         }
     }
@@ -876,6 +943,7 @@ private fun HubChip(
     label: String,
     selected: Boolean,
     focusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
     onFocusSelect: (() -> Unit)? = null,
     showDropdownIcon: Boolean = false,
     onClick: () -> Unit
@@ -901,6 +969,7 @@ private fun HubChip(
         onClick = onClick,
         modifier = Modifier
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .then(downFocusRequester?.let { req -> Modifier.focusProperties { down = req } } ?: Modifier)
             .onFocusChanged { focused = it.isFocused },
         shape = CardDefaults.shape(shape = chipShape),
         colors = CardDefaults.colors(

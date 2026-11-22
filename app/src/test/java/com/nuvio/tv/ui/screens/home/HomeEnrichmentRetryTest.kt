@@ -314,6 +314,28 @@ class HomeEnrichmentRetryTest {
         assertEquals("a not-found answer must not be refetched", 1, calls.get())
     }
 
+    @Test
+    fun `focused IPTV series uses provider metadata with external addon prefetch disabled`() = runBlocking {
+        val seriesId = com.nuvio.tv.core.iptv.XtreamItemRegistry.seriesId("provider", 42)
+        val preview = item(seriesId).copy(description = "Provider synopsis in English")
+        val localizedDescription = "Résumé de la série en français"
+        val repository = newMetaRepository()
+        coEvery { repository.getMetaFromAllAddons(any(), eq(seriesId), eq(sourceUrl)) } returns
+            flowOf(NetworkResult.Success(meta().copy(id = seriesId, description = localizedDescription)))
+        val viewModel = newViewModel(repository)
+        viewModel.externalMetaPrefetchEnabled = false
+        viewModel.seedCatalog(preview)
+
+        viewModel.onItemFocusPipeline(preview)
+
+        withTimeout(5_000) {
+            while (viewModel.enrichedPreviews.value[seriesId]?.description != localizedDescription) {
+                delay(25)
+            }
+        }
+        coVerify(exactly = 1) { repository.getMetaFromAllAddons(any(), eq(seriesId), eq(sourceUrl)) }
+    }
+
     private suspend fun focusAndSettle(viewModel: HomeViewModel, item: MetaPreview) {
         viewModel.onItemFocusPipeline(item)
         // Debounce plus the fetch itself; the assertions that need a specific count poll instead.

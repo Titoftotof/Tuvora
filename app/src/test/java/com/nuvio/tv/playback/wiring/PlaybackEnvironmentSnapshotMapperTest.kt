@@ -52,7 +52,10 @@ class PlaybackEnvironmentSnapshotMapperTest {
 
         val mapped = map(android = android, profile = SessionProfile.GUIDE)
 
-        assertEquals(setOf(SurfaceMode.TEXTURE_VIEW), mapped.allowedSurfaceModes)
+        assertEquals(
+            setOf(SurfaceMode.TEXTURE_VIEW, SurfaceMode.NATIVE_EMBED, SurfaceMode.GPU_RENDER),
+            mapped.allowedSurfaceModes,
+        )
     }
 
     @Test

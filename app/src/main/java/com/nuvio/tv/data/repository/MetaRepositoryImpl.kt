@@ -12,6 +12,9 @@ import com.nuvio.tv.data.mediaserver.serverFailure
 import com.nuvio.tv.data.remote.api.AddonApi
 import com.nuvio.tv.domain.model.Addon
 import com.nuvio.tv.core.iptv.isXtream
+import com.nuvio.tv.core.iptv.match.MatchKind
+import com.nuvio.tv.core.iptv.match.XtreamMatchIndex
+import com.nuvio.tv.data.local.TmdbSettingsDataStore
 import com.nuvio.tv.core.iptv.rebuildFromId
 import com.nuvio.tv.core.iptv.toMeta
 import com.nuvio.tv.domain.model.Meta
@@ -52,7 +55,9 @@ class MetaRepositoryImpl @Inject constructor(
     private val tmdbMetadataService: com.nuvio.tv.core.tmdb.TmdbMetadataService,
     private val iptvItemDisplay: com.nuvio.tv.core.iptv.IptvItemDisplayLookup,
     private val serverCatalog: ServerCatalog,
-    private val iptvMovieMetadata: com.nuvio.tv.core.iptv.IptvMovieMetadata
+    private val iptvMovieMetadata: com.nuvio.tv.core.iptv.IptvMovieMetadata,
+    private val tmdbSettingsStore: TmdbSettingsDataStore,
+    private val xtreamMatchIndex: XtreamMatchIndex
 ) : MetaRepository {
     companion object {
         private const val TAG = "MetaRepository"
@@ -278,17 +283,30 @@ class MetaRepositoryImpl @Inject constructor(
                 season = ep.season, episode = ep.episodeNum, overview = ep.plot
             )
         }
-        val enrichment = detail.tmdbId?.let {
-            runCatching { tmdbMetadataService.fetchEnrichment(it.toString(), com.nuvio.tv.domain.model.ContentType.SERIES) }.getOrNull()
-        }
+        val settings = tmdbSettingsStore.settings.value
+        val providerTmdbId = detail.tmdbId?.takeIf { it > 0 }
+        val tmdbId = providerTmdbId ?: if (settings.enabled && account.isXtream()) {
+            xtreamMatchIndex.item(account.id, MatchKind.SERIES, item.streamId)?.tmdb?.takeIf { it > 0 }
+        } else null
+        val enrichment = if (settings.enabled && tmdbId != null) {
+            withTimeoutOrNull(12_000) {
+                tmdbMetadataService.fetchEnrichment(
+                    tmdbId.toString(),
+                    com.nuvio.tv.domain.model.ContentType.SERIES,
+                    settings.language,
+                )
+            }
+        } else null
+        val providerDescription = detail.plot?.takeIf { it.isNotBlank() } ?: base.description
         return base.copy(
             type = com.nuvio.tv.domain.model.ContentType.SERIES,
-            tmdbId = detail.tmdbId?.takeIf { it > 0 },
+            tmdbId = tmdbId,
             videos = videos,
             poster = enrichment?.poster ?: base.poster,
             background = enrichment?.backdrop ?: detail.backdrop,
             logo = enrichment?.logo,
-            description = enrichment?.description ?: detail.plot ?: base.description,
+            description = enrichment?.description?.takeIf { settings.useBasicInfo && it.isNotBlank() }
+                ?: providerDescription,
             releaseInfo = enrichment?.releaseInfo ?: base.releaseInfo,
             imdbRating = enrichment?.rating?.toFloat() ?: base.imdbRating,
             genres = enrichment?.genres?.ifEmpty { base.genres } ?: base.genres,

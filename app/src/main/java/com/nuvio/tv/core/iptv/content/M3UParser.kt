@@ -82,8 +82,8 @@ object M3UParser {
      */
     fun parseExtInf(extInfLine: String, url: String): M3UEntry? {
         if (!extInfLine.startsWith("#EXTINF")) return null
-        // Display name = everything after the LAST comma that isn't inside a quoted attribute.
-        val comma = lastUnquotedComma(extInfLine)
+        // Display name = everything after the FIRST comma that isn't inside a quoted attribute.
+        val comma = firstUnquotedComma(extInfLine)
         val displayName = if (comma >= 0) extInfLine.substring(comma + 1).trim() else ""
         val attrsPart = if (comma >= 0) extInfLine.substring(0, comma) else extInfLine
         val attrs = HashMap<String, String>()
@@ -105,15 +105,14 @@ object M3UParser {
     }
 
     /** Index of the comma that starts the display name, ignoring commas inside `attr="..."`. */
-    private fun lastUnquotedComma(line: String): Int {
+    private fun firstUnquotedComma(line: String): Int {
         var inQuote = false
-        var last = -1
         for (i in line.indices) {
             val c = line[i]
             if (c == '"') inQuote = !inQuote
-            else if (c == ',' && !inQuote) last = i
+            else if (c == ',' && !inQuote) return i
         }
-        return last
+        return -1
     }
 
     /**

@@ -111,13 +111,15 @@ internal fun RowScope.GuideProgrammeCells(
     onExitTimeline: (() -> Unit)? = null,
 ) {
     val windowEndMs = windowStartMs + GuideTimeTravel.WINDOW_MS
-    val visible = programmes
-        .filter { it.endMs > windowStartMs && it.startMs < windowEndMs && it.endMs > it.startMs }
-        .sortedBy { it.startMs }
+    val visible = remember(programmes, windowStartMs) {
+        programmes
+            .filter { it.endMs > windowStartMs && it.startMs < windowEndMs && it.endMs > it.startMs }
+            .sortedBy { it.startMs }
+    }
     // Inspection is useful even when a programme cannot be played (future/no archive).
     // Playback eligibility remains in GuideCellIntent, independent of focus eligibility.
     val actionable = if (interactive) visible else emptyList()
-    val actionableStarts = actionable.map { it.startMs }
+    val actionableStarts = remember(actionable) { actionable.map { it.startMs } }
     val firstActionableStart = actionableStarts.firstOrNull()
     val lastActionableStart = actionableStarts.lastOrNull()
     var focusedStart by remember { mutableStateOf<Long?>(null) }
@@ -209,8 +211,8 @@ internal fun RowScope.GuideProgrammeCells(
                         // The app's D-pad vocabulary: a focused strip is outlined like a cell.
                         .border(
                             if (stripFocused) 2.dp else 0.dp,
-                            if (stripFocused) NuvioTheme.colors.BorderFocused else Color.Transparent,
-                            RoundedCornerShape(NuvioTheme.radii.xs),
+                            if (stripFocused) TiviMateStyle.FocusSurface else Color.Transparent,
+                            TiviMateStyle.ShapeXs,
                         )
                         // clickable for reliable D-pad focus (see GuideCell); OK on an empty
                         // stretch of time has nothing to do.
@@ -220,7 +222,7 @@ internal fun RowScope.GuideProgrammeCells(
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
+            horizontalArrangement = Arrangement.spacedBy(1.5.dp)
         ) {
             if (visible.isEmpty()) {
                 GuideCell(
@@ -273,9 +275,9 @@ internal fun RowScope.GuideProgrammeCells(
                 Spacer(Modifier.weight(nowFraction.coerceIn(0.001f, 0.999f)))
                 Box(
                     Modifier
-                        .width(2.dp)
+                        .width(1.5.dp)
                         .fillMaxHeight()
-                        .background(NuvioTheme.colors.Error)
+                        .background(TiviMateStyle.Accent)
                 )
                 Spacer(Modifier.weight((1f - nowFraction).coerceIn(0.001f, 0.999f)))
             }
@@ -310,26 +312,26 @@ private fun RowScope.GuideCell(
         modifier = Modifier
             .weight(weightMs.coerceAtLeast(60_000L).toFloat())
             .fillMaxHeight()
-            .clip(RoundedCornerShape(NuvioTheme.radii.xs))
+            .clip(TiviMateStyle.ShapeXs)
             .background(
                 when {
-                    isFocused -> NuvioTheme.colors.FocusBackground
-                    live -> NuvioTheme.colors.Primary.copy(alpha = 0.20f)
-                    filler -> NuvioTheme.colors.BackgroundElevated.copy(alpha = 0.4f)
-                    else -> NuvioTheme.colors.BackgroundElevated
+                    isFocused -> TiviMateStyle.FocusSurface
+                    live -> TiviMateStyle.CellLiveSurface
+                    filler -> TiviMateStyle.CellFillerSurface
+                    else -> TiviMateStyle.CellSurface
                 }
             )
             .border(
-                if (isFocused) 2.dp else 0.dp,
-                if (isFocused) NuvioTheme.colors.BorderFocused else Color.Transparent,
-                RoundedCornerShape(NuvioTheme.radii.xs)
+                if (isFocused) 1.5.dp else 0.dp,
+                if (isFocused) TiviMateStyle.FocusSurface else Color.Transparent,
+                TiviMateStyle.ShapeXs
             )
             .then(focusRequesters.fold<FocusRequester, Modifier>(Modifier) { m, r -> m.focusRequester(r) })
             .onFocusChanged { isFocused = it.isFocused; if (it.isFocused) latestOnFocused() }
             // clickable, not focusable(): the same reason GuideCategoryRow gives — plain
             // focusable() does not reliably take D-pad focus inside these lists.
             .then(if (focusable) Modifier.clickable { latestOnClick() } else Modifier)
-            .padding(horizontal = 6.dp),
+            .padding(horizontal = 8.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         if (title == null) return@Box
@@ -338,7 +340,7 @@ private fun RowScope.GuideCell(
                 Text(
                     text = REPLAY_GLYPH,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (isFocused) NuvioTheme.colors.FocusContent else NuvioTheme.colors.Primary,
+                    color = if (isFocused) TiviMateStyle.FocusContent else TiviMateStyle.Accent,
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.width(4.dp))
@@ -346,10 +348,11 @@ private fun RowScope.GuideCell(
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (isFocused || live) FontWeight.Medium else FontWeight.Normal,
                 color = when {
-                    isFocused -> NuvioTheme.colors.FocusContent
-                    live -> NuvioTheme.colors.TextPrimary
-                    else -> NuvioTheme.colors.TextSecondary
+                    isFocused -> TiviMateStyle.FocusContent
+                    live -> TiviMateStyle.TextPrimary
+                    else -> TiviMateStyle.TextSecondary
                 },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -371,36 +374,58 @@ internal fun GuideTimeHeaderWithDay(
     nowMs: Long,
     labelWidth: Dp,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = NuvioTheme.spacing.md + NuvioTheme.spacing.sm, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    Column(Modifier.fillMaxWidth().background(TiviMateStyle.HeaderBackground)) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(TiviMateStyle.Divider))
         Row(
-            modifier = Modifier.width(labelWidth + NuvioTheme.spacing.sm),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(28.dp)
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val atLive = GuideTimeTravel.isAtLiveEdge(windowStartMs, nowMs)
-            Text(
-                text = guideDayLabel(windowStartMs, nowMs),
-                style = MaterialTheme.typography.labelSmall,
-                color = if (atLive) NuvioTheme.colors.TextSecondary else NuvioTheme.colors.Primary,
-                fontWeight = if (atLive) FontWeight.Normal else FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                modifier = Modifier.width(labelWidth + 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val atLive = GuideTimeTravel.isAtLiveEdge(windowStartMs, nowMs)
+                val dayAndClock = remember(windowStartMs, nowMs, atLive) {
+                    val rawDay = guideDayLabel(windowStartMs, nowMs)
+                    val localizedDay = when (rawDay) {
+                        "Today", "Yesterday", "Tomorrow" -> {
+                            val anchorMs = if (GuideTimeTravel.containsNow(windowStartMs, nowMs)) nowMs else windowStartMs
+                            android.text.format.DateUtils.getRelativeTimeSpanString(
+                                anchorMs,
+                                nowMs,
+                                android.text.format.DateUtils.DAY_IN_MILLIS,
+                                android.text.format.DateUtils.FORMAT_SHOW_DATE,
+                            ).toString()
+                        }
+                        else -> rawDay
+                    }
+                    if (atLive) "$localizedDay · ${guideHhMm(nowMs)}" else localizedDay
+                }
+                Text(
+                    text = dayAndClock,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (atLive) TiviMateStyle.TextSecondary else TiviMateStyle.Accent,
+                    fontWeight = if (atLive) FontWeight.Medium else FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            val slots = (GuideTimeTravel.WINDOW_MS / GuideTimeTravel.SLOT_MS).toInt()
+            repeat(slots) { i ->
+                Text(
+                    text = guideHhMm(windowStartMs + i * GuideTimeTravel.SLOT_MS),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TiviMateStyle.TextSecondary,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1
+                )
+            }
         }
-        val slots = (GuideTimeTravel.WINDOW_MS / GuideTimeTravel.SLOT_MS).toInt()
-        repeat(slots) { i ->
-            Text(
-                text = guideHhMm(windowStartMs + i * GuideTimeTravel.SLOT_MS),
-                style = MaterialTheme.typography.labelSmall,
-                color = NuvioTheme.colors.TextSecondary,
-                modifier = Modifier.weight(1f),
-                maxLines = 1
-            )
-        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(TiviMateStyle.Divider))
     }
 }
 

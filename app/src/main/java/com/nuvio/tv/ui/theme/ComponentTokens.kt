@@ -131,8 +131,8 @@ object NuvioComponents {
             titleBottomSpacing = 14.dp
         ),
         sidebar = NuvioSidebarComponentTokens(
-            legacyCollapsedWidth = 72.dp,
-            legacyExpandedWidth = 196.dp,
+            legacyCollapsedWidth = 56.dp,
+            legacyExpandedWidth = 220.dp,
             collapsedWidth = 184.dp,
             expandedWidth = 230.dp,
             itemHeight = 52.dp,

@@ -1273,8 +1273,10 @@ class PlaybackSession(
         val original = machine.launch ?: return
         val profileSnapshot = machine.snapshot.profile
         val preferenceSnapshot = preferences
-        val reconnectFeedback = machine.snapshot.failure?.toProviderResolutionFeedback()
+        val reconnectFailure = machine.snapshot.failure
+        val reconnectFeedback = reconnectFailure?.toProviderResolutionFeedback()
         reconnectJob = generationScope(action.generation).launch {
+            var lastAttemptFailure = reconnectFailure
             var attempt = 0
             while (
                 currentCoroutineContext().isActive &&
@@ -1298,7 +1300,10 @@ class PlaybackSession(
                     liveReconnectAttempts.removeFirst()
                 }
                 if (!policy.liveReconnectAllowed(attempt, liveReconnectAttempts, now)) {
-                    liveReconnectEscalated(action.generation, policy.liveReconnectExhaustedFailure())
+                    liveReconnectEscalated(
+                        action.generation,
+                        policy.liveReconnectExhaustedFailure(lastAttemptFailure, failedEngine = graph.engine),
+                    )
                     return@launch
                 }
                 liveReconnectAttempts.addLast(now)
@@ -1329,6 +1334,7 @@ class PlaybackSession(
                 )) {
                     is PlaybackResult.Success -> result.value
                     is PlaybackResult.Failure -> {
+                        lastAttemptFailure = result.failure
                         if (result.failure.shouldEscalateLiveReconnect()) {
                             liveReconnectEscalated(action.generation, result.failure)
                             return@launch
@@ -1347,6 +1353,7 @@ class PlaybackSession(
                 )) {
                     is PlaybackResult.Success -> result.value
                     is PlaybackResult.Failure -> {
+                        lastAttemptFailure = result.failure
                         if (result.failure.shouldEscalateLiveReconnect()) {
                             liveReconnectEscalated(action.generation, result.failure)
                             return@launch
@@ -1367,6 +1374,7 @@ class PlaybackSession(
                 }
                 if (attached is PlaybackResult.Failure) {
                     outcome.cancel()
+                    lastAttemptFailure = attached.failure
                     if (attached.failure.shouldEscalateLiveReconnect()) {
                         liveReconnectEscalated(action.generation, attached.failure)
                         return@launch
@@ -1383,6 +1391,7 @@ class PlaybackSession(
                 )
                 if (output is PlaybackResult.Failure) {
                     outcome.cancel()
+                    lastAttemptFailure = output.failure
                     if (output.failure.shouldEscalateLiveReconnect()) {
                         liveReconnectEscalated(action.generation, output.failure)
                         return@launch
@@ -1415,6 +1424,7 @@ class PlaybackSession(
                 }
                 if (started is PlaybackResult.Failure) {
                     outcome.cancel()
+                    lastAttemptFailure = started.failure
                     if (started.failure.shouldEscalateLiveReconnect()) {
                         liveReconnectEscalated(action.generation, started.failure)
                         return@launch
@@ -1437,6 +1447,7 @@ class PlaybackSession(
                         return@launch
                     }
                     is PlaybackEvent.Failed -> {
+                        lastAttemptFailure = event.failure
                         if (event.failure.shouldEscalateLiveReconnect()) {
                             liveReconnectEscalated(action.generation, event.failure)
                             return@launch

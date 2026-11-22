@@ -43,6 +43,8 @@ import com.nuvio.tv.R
 import com.nuvio.tv.domain.model.DiscoverLocation
 import com.nuvio.tv.domain.model.HomeImdbRatingsVisibility
 import com.nuvio.tv.domain.model.HomeLayout
+import com.nuvio.tv.domain.model.IptvSidebarMode
+import com.nuvio.tv.domain.model.SidebarDestination
 import com.nuvio.tv.ui.components.ClassicLayoutPreview
 import com.nuvio.tv.ui.components.GridLayoutPreview
 import com.nuvio.tv.ui.components.ModernLayoutPreview
@@ -275,10 +277,125 @@ private fun SidebarEntriesSection(
             },
             modifier = Modifier.testTag(LayoutSettingsTestTags.sidebarEntry(row.destination))
         )
+        if (row.destination == SidebarDestination.IPTV && visible) {
+            IptvSidebarModeRow(
+                selectedMode = uiState.iptvSidebarMode,
+                onModeSelected = { mode ->
+                    onEvent(LayoutSettingsEvent.SetIptvSidebarMode(mode))
+                }
+            )
+            IptvGuideOkActionRow(
+                directFullscreen = uiState.iptvGuideDirectFullscreen,
+                onDirectFullscreenSelected = { direct ->
+                    onEvent(LayoutSettingsEvent.SetIptvGuideDirectFullscreen(direct))
+                }
+            )
+            SettingsToggleRow(
+                title = stringResource(R.string.layout_iptv_start_on_live_tv),
+                subtitle = stringResource(R.string.layout_iptv_start_on_live_tv_desc),
+                checked = uiState.iptvStartOnLiveTv,
+                onToggle = {
+                    onEvent(LayoutSettingsEvent.SetIptvStartOnLiveTv(!uiState.iptvStartOnLiveTv))
+                }
+            )
+        }
     }
 
     if (uiState.discoverLocation == DiscoverLocation.IN_SIDEBAR) {
         SettingsNote(text = stringResource(R.string.layout_sidebar_discover_note))
+    }
+}
+
+@Composable
+private fun IptvSidebarModeRow(
+    selectedMode: IptvSidebarMode,
+    onModeSelected: (IptvSidebarMode) -> Unit
+) {
+    var dialogOpen by remember { mutableStateOf(false) }
+    val currentLabel = when (selectedMode) {
+        IptvSidebarMode.HUB -> stringResource(R.string.layout_iptv_sidebar_mode_hub)
+        IptvSidebarMode.SPLIT -> stringResource(R.string.layout_iptv_sidebar_mode_split)
+    }
+
+    SettingsActionRow(
+        title = stringResource(R.string.layout_iptv_sidebar_mode),
+        subtitle = null,
+        value = currentLabel,
+        onClick = { dialogOpen = true }
+    )
+
+    if (dialogOpen) {
+        val options = listOf(
+            SettingsPickerOption(
+                IptvSidebarMode.HUB,
+                stringResource(R.string.layout_iptv_sidebar_mode_hub),
+                stringResource(R.string.layout_iptv_sidebar_mode_hub_desc)
+            ),
+            SettingsPickerOption(
+                IptvSidebarMode.SPLIT,
+                stringResource(R.string.layout_iptv_sidebar_mode_split),
+                stringResource(R.string.layout_iptv_sidebar_mode_split_desc)
+            )
+        )
+        SettingsSingleChoiceDialog(
+            title = stringResource(R.string.layout_iptv_sidebar_mode_dialog_title),
+            options = options,
+            selectedValue = selectedMode,
+            onOptionSelected = { mode ->
+                onModeSelected(mode)
+                dialogOpen = false
+            },
+            onDismiss = { dialogOpen = false },
+            width = 480.dp,
+            maxHeight = 320.dp
+        )
+    }
+}
+
+@Composable
+private fun IptvGuideOkActionRow(
+    directFullscreen: Boolean,
+    onDirectFullscreenSelected: (Boolean) -> Unit
+) {
+    var dialogOpen by remember { mutableStateOf(false) }
+    val currentLabel = if (directFullscreen) {
+        stringResource(R.string.layout_iptv_guide_ok_fullscreen)
+    } else {
+        stringResource(R.string.layout_iptv_guide_ok_preview)
+    }
+
+    SettingsActionRow(
+        title = stringResource(R.string.layout_iptv_guide_ok_action),
+        subtitle = null,
+        value = currentLabel,
+        onClick = { dialogOpen = true }
+    )
+
+    if (dialogOpen) {
+        val options = listOf(
+            SettingsPickerOption(
+                false,
+                stringResource(R.string.layout_iptv_guide_ok_preview),
+                stringResource(R.string.layout_iptv_guide_ok_preview_desc)
+            ),
+            SettingsPickerOption(
+                true,
+                stringResource(R.string.layout_iptv_guide_ok_fullscreen),
+                stringResource(R.string.layout_iptv_guide_ok_fullscreen_desc)
+            )
+        )
+        SettingsSingleChoiceDialog(
+            title = stringResource(R.string.layout_iptv_guide_ok_action_dialog_title),
+            options = options,
+            selectedValue = directFullscreen,
+            onOptionSelected = { selected ->
+                onDirectFullscreenSelected(selected)
+                dialogOpen = false
+            },
+            onDismiss = { dialogOpen = false },
+            width = 480.dp,
+            maxHeight = 320.dp
+        )
     }
 }
 

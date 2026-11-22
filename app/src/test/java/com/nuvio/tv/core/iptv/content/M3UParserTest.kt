@@ -47,7 +47,7 @@ class M3UParserTest {
     fun `parseExtInf extracts tvg-id logo group-title and display name`() {
         val line = """#EXTINF:-1 tvg-id="bbc.uk" tvg-name="BBC One" tvg-logo="http://img/bbc.png" group-title="UK NEWS",BBC One HD"""
         val e = M3UParser.parseExtInf(line, "http://h:8080/live/u/p/42.ts")!!
-        assertEquals("BBC One HD", e.name)             // display name (after the last unquoted comma)
+        assertEquals("BBC One HD", e.name)             // display name (after the first unquoted comma)
         assertEquals("bbc.uk", e.tvgId)
         assertEquals("BBC One", e.tvgName)
         assertEquals("http://img/bbc.png", e.logo)
@@ -66,9 +66,9 @@ class M3UParserTest {
     @Test
     fun `parseExtInf handles commas inside attribute values`() {
         // a comma inside group-title must NOT be treated as the display-name separator
-        val line = """#EXTINF:-1 tvg-logo="x" group-title="Movies, Action",Die Hard (1988)"""
+        val line = """#EXTINF:-1 tvg-logo="x" group-title="Movies, Action",Die Hard, (1988)"""
         val e = M3UParser.parseExtInf(line, "http://h/movie/u/p/1.mp4")!!
-        assertEquals("Die Hard (1988)", e.name)
+        assertEquals("Die Hard, (1988)", e.name)
         assertEquals("Movies, Action", e.group)
     }
 

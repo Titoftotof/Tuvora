@@ -33,6 +33,7 @@ import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.core.build.AppFeaturePolicy
 import com.nuvio.tv.core.party.PartyMedia
 import com.nuvio.tv.domain.model.ExperienceMode
+import com.nuvio.tv.domain.model.IptvSidebarMode
 import com.nuvio.tv.data.mediaserver.ServerCatalog
 import com.nuvio.tv.ui.screens.CatalogSeeAllScreen
 import com.nuvio.tv.ui.screens.ExperienceModeSelectionScreen
@@ -85,7 +86,8 @@ private fun cleanLiveFeedbackMessage(feedback: CleanLiveIngressFeedback): Int = 
 fun NuvioNavHost(
     navController: NavHostController,
     startDestination: String = Screen.Home.route,
-    hideBuiltInHeaders: Boolean = false
+    hideBuiltInHeaders: Boolean = false,
+    iptvSidebarMode: IptvSidebarMode = IptvSidebarMode.HUB
 ) {
     PlaybackAvailabilityProvider {
         // The NavController keeps its back stack ViewModels in the store of the owner it is
@@ -93,7 +95,7 @@ fun NuvioNavHost(
         val navViewModelStoreOwner = LocalNavViewModelStoreOwner.current
             ?: checkNotNull(LocalViewModelStoreOwner.current)
         CompositionLocalProvider(LocalViewModelStoreOwner provides navViewModelStoreOwner) {
-            PlaybackNavHost(navController, startDestination, hideBuiltInHeaders)
+            PlaybackNavHost(navController, startDestination, hideBuiltInHeaders, iptvSidebarMode)
         }
     }
 }
@@ -102,8 +104,11 @@ fun NuvioNavHost(
 private fun PlaybackNavHost(
     navController: NavHostController,
     startDestination: String,
-    hideBuiltInHeaders: Boolean
+    hideBuiltInHeaders: Boolean,
+    iptvSidebarMode: IptvSidebarMode
 ) {
+    fun liveGuideRoute(): String =
+        if (iptvSidebarMode == IptvSidebarMode.SPLIT) Screen.IptvLive.route else Screen.XtreamHub.route
     val playbackAvailability = LocalPlaybackAvailability.current
     val context = LocalContext.current
     val cleanLiveIngressViewModel =
@@ -980,11 +985,12 @@ private fun PlaybackNavHost(
                     ?.getString("contentType").equals("live", ignoreCase = true)
                 if (!isLive) return false
                 // Prefer whichever live surface launched us: the Sports hub if it's on the
-                // stack (its match overlay started playback), else the IPTV guide.
+                // stack (its match overlay started playback), else the IPTV guide (split or hub).
                 val popped = navController.popBackStack(Screen.SportsHub.route, inclusive = false) ||
+                    navController.popBackStack(Screen.IptvLive.route, inclusive = false) ||
                     navController.popBackStack(Screen.XtreamHub.route, inclusive = false)
                 if (!popped) {
-                    navController.navigate(Screen.XtreamHub.route) { launchSingleTop = true }
+                    navController.navigate(liveGuideRoute()) { launchSingleTop = true }
                 }
                 return true
             }
@@ -1412,41 +1418,62 @@ private fun PlaybackNavHost(
             )
         }
 
-        composable(Screen.XtreamHub.route) {
-            com.nuvio.tv.ui.screens.iptv.XtreamHubScreen(
-                onOpenDetail = { contentId, type ->
-                    navController.navigate(Screen.Detail.createRoute(contentId, type))
-                },
-                onAddProvider = { navController.navigate(Screen.IptvSettings.route + "?add=true") },
-                onManagePlaylists = { navController.navigate(Screen.IptvSettings.route) },
-                onPairFromPhone = { navController.navigate(Screen.IptvPairing.route) },
-                onEnterSetupCode = { navController.navigate(Screen.IptvSetupCode.route) },
-                // Catch-up takes the same proven live route (contentType="live" keeps the live DoH
-                // and engine handling, and routes BACK to this hub), plus the isCatchUp flag that
-                // turns off the three behaviours a recording must not have.
-                onPlayCatchUp = { url, title, contentId, startMs, endMs ->
-                    navController.navigate(
-                        Screen.Player.createRoute(
-                            streamUrl = url,
-                            title = title,
-                            contentType = "live",
-                            contentId = contentId,
-                            isCatchUp = true,
-                            catchUpStartMs = startMs,
-                            catchUpEndMs = endMs,
+        fun registerIptvHubRoute(
+            route: String,
+            fixedSection: com.nuvio.tv.ui.screens.iptv.XtreamSection?
+        ) {
+            composable(
+                route = route,
+                arguments = listOf(
+                    navArgument(com.nuvio.tv.ui.screens.iptv.XtreamHubViewModel.ARG_FIXED_SECTION) {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = fixedSection?.name
+                    }
+                )
+            ) {
+                com.nuvio.tv.ui.screens.iptv.XtreamHubScreen(
+                    onOpenDetail = { contentId, type ->
+                        navController.navigate(Screen.Detail.createRoute(contentId, type))
+                    },
+                    onAddProvider = { navController.navigate(Screen.IptvSettings.route + "?add=true") },
+                    onManagePlaylists = { navController.navigate(Screen.IptvSettings.route) },
+                    onPairFromPhone = { navController.navigate(Screen.IptvPairing.route) },
+                    onEnterSetupCode = { navController.navigate(Screen.IptvSetupCode.route) },
+                    // Catch-up takes the same proven live route (contentType="live" keeps the live DoH
+                    // and engine handling, and routes BACK to this hub), plus the isCatchUp flag that
+                    // turns off the three behaviours a recording must not have.
+                    onPlayCatchUp = { url, title, contentId, startMs, endMs ->
+                        navController.navigate(
+                            Screen.Player.createRoute(
+                                streamUrl = url,
+                                title = title,
+                                contentType = "live",
+                                contentId = contentId,
+                                isCatchUp = true,
+                                catchUpStartMs = startMs,
+                                catchUpEndMs = endMs,
+                            )
                         )
-                    )
-                }
-            )
+                    },
+                    fixedSection = fixedSection,
+                    hideBuiltInHeaders = hideBuiltInHeaders
+                )
+            }
         }
+
+        registerIptvHubRoute(Screen.XtreamHub.route, fixedSection = null)
+        registerIptvHubRoute(Screen.IptvLive.route, fixedSection = com.nuvio.tv.ui.screens.iptv.XtreamSection.LIVE)
+        registerIptvHubRoute(Screen.IptvMovies.route, fixedSection = com.nuvio.tv.ui.screens.iptv.XtreamSection.MOVIES)
+        registerIptvHubRoute(Screen.IptvSeries.route, fixedSection = com.nuvio.tv.ui.screens.iptv.XtreamSection.SERIES)
 
         composable(Screen.IptvPairing.route) {
             com.nuvio.tv.ui.screens.iptv.IptvPairingScreen(
                 onBackPress = { navController.popBackStack() },
-                // On success, land the user on the IPTV hub so they can immediately browse the
+                // On success, land the user on the IPTV guide so they can immediately browse the
                 // just-added playlist (pop back through this screen so BACK doesn't return here).
                 onPaired = {
-                    navController.navigate(Screen.XtreamHub.route) {
+                    navController.navigate(liveGuideRoute()) {
                         popUpTo(Screen.IptvPairing.route) { inclusive = true }
                         launchSingleTop = true
                     }

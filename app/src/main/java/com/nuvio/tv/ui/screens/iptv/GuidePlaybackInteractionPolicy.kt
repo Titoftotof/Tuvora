@@ -5,11 +5,17 @@ internal object GuidePlaybackInteractionPolicy {
     fun focus(state: LiveGuideUiState, channelId: String): LiveGuideUiState =
         state.copy(focusedChannelId = channelId, actionError = null)
 
-    enum class Click { TUNE, FULLSCREEN, RETRY }
+    enum class Click { TUNE, FULLSCREEN, TUNE_AND_FULLSCREEN, RETRY }
 
-    fun click(channelId: String, playingId: String?, pendingId: String?, fullscreenEnabled: Boolean): Click = when {
+    fun click(
+        channelId: String,
+        playingId: String?,
+        pendingId: String?,
+        fullscreenEnabled: Boolean,
+        directFullscreen: Boolean = false,
+    ): Click = when {
         channelId == pendingId -> Click.FULLSCREEN
-        channelId != playingId -> Click.TUNE
+        channelId != playingId -> if (directFullscreen) Click.TUNE_AND_FULLSCREEN else Click.TUNE
         fullscreenEnabled -> Click.FULLSCREEN
         else -> Click.RETRY
     }

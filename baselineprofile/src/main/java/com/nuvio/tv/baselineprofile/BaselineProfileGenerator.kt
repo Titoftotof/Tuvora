@@ -21,7 +21,7 @@ class BaselineProfileGenerator {
 
     @Test
     fun generate() {
-        val targetPackage = "com.nuvio.tv"
+        val targetPackage = "com.tuvora.tv"
         rule.collect(
             packageName = targetPackage,
             includeInStartupProfile = true
@@ -80,6 +80,28 @@ class BaselineProfileGenerator {
             device.pressBack()
             device.waitForIdle()
             Thread.sleep(800)
+
+            // Also warm up the IPTV / Live TV paths (both HUB and SPLIT sidebar entries).
+            device.pressDPadLeft()
+            device.waitForIdle()
+            Thread.sleep(300)
+            if (device.focusAndSelect("Live TV", maxSteps = 10) ||
+                device.focusAndSelect("IPTV", maxSteps = 10)
+            ) {
+                Thread.sleep(1_500)
+                // Enter the guide / scroll channels to AOT-compile the live guide list & EPG rows.
+                device.pressDPadRight()
+                device.waitForIdle()
+                repeat(12) {
+                    device.pressDPadDown()
+                    Thread.sleep(80)
+                }
+                device.waitForIdle()
+                // Return to sidebar for the next iteration.
+                device.pressBack()
+                device.waitForIdle()
+                Thread.sleep(400)
+            }
             } finally {
                 // Restore original locale.
                 if (originalLocale.isNotBlank()) {

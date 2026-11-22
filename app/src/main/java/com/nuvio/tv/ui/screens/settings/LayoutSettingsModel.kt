@@ -105,7 +105,8 @@ internal fun sidebarEntryIsLocked(
 ): Boolean {
     val visible = visibleSidebarDestinations(
         uiState.hiddenSidebarDestinations,
-        uiState.discoverLocation
+        uiState.discoverLocation,
+        uiState.iptvSidebarMode
     )
     return visible.size <= 1 && destination in visible
 }

@@ -58,7 +58,8 @@ internal object PlaybackEnvironmentSnapshotMapper {
         }
 
         input.android.forcedSurface(input.profile)?.let { forced ->
-            allowedSurfaces = allowedSurfaces.intersect(setOf(forced))
+            val forcedFamily = if (forced in MEDIA3_SURFACES) MEDIA3_SURFACES else LIBMPV_SURFACES
+            allowedSurfaces = allowedSurfaces.filterTo(mutableSetOf()) { it !in forcedFamily || it == forced }
         }
 
         return PlaybackEnvironmentSnapshot(

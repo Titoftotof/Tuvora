@@ -111,6 +111,9 @@ class LiveGuideBoundedLoadTest {
             accountStore = mockk<com.nuvio.tv.data.local.XtreamAccountStore>(relaxed = true) {
                 every { accounts } returns flowOf(listOf(account))
             },
+            layoutPreferenceDataStore = mockk<com.nuvio.tv.data.local.LayoutPreferenceDataStore>(relaxed = true) {
+                every { iptvGuideDirectFullscreen } returns flowOf(false)
+            },
         )
     }
 

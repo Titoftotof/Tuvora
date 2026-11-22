@@ -18,6 +18,7 @@ import com.nuvio.tv.core.iptv.XtreamLivePlaylist
 import com.nuvio.tv.core.iptv.XtreamProgram
 import com.nuvio.tv.core.iptv.XtreamResolvedItem
 import com.nuvio.tv.core.profile.ProfileManager
+import com.nuvio.tv.data.local.LayoutPreferenceDataStore
 import com.nuvio.tv.data.local.LiveChannelRef
 import com.nuvio.tv.data.local.XtreamLiveStore
 import com.nuvio.tv.domain.model.ContentType
@@ -156,7 +157,10 @@ data class LiveGuideUiState(
     /** F03: tune this channel once it is in the list (after such a switch). */
     val pendingTune: String? = null,
 ) {
-    val focusedChannel: GuideChannel? get() = channels.firstOrNull { it.contentId == focusedChannelId }
+    private val channelsById: Map<String, GuideChannel> by lazy(LazyThreadSafetyMode.NONE) {
+        channels.associateBy { it.contentId }
+    }
+    val focusedChannel: GuideChannel? get() = focusedChannelId?.let(channelsById::get)
     val loadingChannels: Boolean get() = channelsLoad is LoadStatus.Loading
 }
 
@@ -223,7 +227,12 @@ class XtreamLiveGuideViewModel @Inject constructor(
     private val xmltv: com.nuvio.tv.core.iptv.epg.XmltvClient,
     private val overlayRepository: com.nuvio.tv.core.iptv.overlay.IptvOverlayRepository,
     private val accountStore: com.nuvio.tv.data.local.XtreamAccountStore,
+    layoutPreferenceDataStore: LayoutPreferenceDataStore,
 ) : ViewModel() {
+
+    /** Whether OK on an unfocused/non-playing channel in the guide opens fullscreen directly. */
+    val guideDirectFullscreen: StateFlow<Boolean> = layoutPreferenceDataStore.iptvGuideDirectFullscreen
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     /**
      * Historical guide for the FOCUSED channel only — `get_simple_data_table`, which is the one
@@ -241,6 +250,11 @@ class XtreamLiveGuideViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(LiveGuideUiState())
     val uiState: StateFlow<LiveGuideUiState> = _uiState.asStateFlow()
+
+    // Coalesces concurrent neighbour EPG arrivals into a single state emission so scrolling or
+    // focusing doesn't trigger a burst of full-guide recompositions.
+    private val pendingEpgUpdates = LinkedHashMap<Int, Triple<XtreamProgram?, XtreamProgram?, List<XtreamProgram>>>()
+    private var epgFlushJob: Job? = null
 
     // Personalization overlay: the last unfiltered channel list + account, so a hide/pin edit (D-pad or
     // synced from the web) re-applies live without a re-fetch. DECLARED BEFORE init on purpose:
@@ -663,6 +677,9 @@ class XtreamLiveGuideViewModel @Inject constructor(
             return
         }
         epgRequested.clear()
+        epgFlushJob?.cancel()
+        epgFlushJob = null
+        pendingEpgUpdates.clear()
         _uiState.update {
             it.copy(
                 accountId = acc.id,
@@ -1275,10 +1292,55 @@ class XtreamLiveGuideViewModel @Inject constructor(
                 val next = programs.getOrNull(nowIdx + 1)
                 // Merge, never replace: a row already drawn from stored rows keeps its cells (the
                 // past lives only there) and takes just the fresh now/next — B11.
-                _uiState.update {
-                    it.copy(epg = it.epg + (streamId to GuideWindowRows.mergeNowNext(it.epg[streamId], now, next, programs)))
-                }
+                val focusedStreamId = _uiState.value.focusedChannel?.streamId
+                enqueueEpgUpdate(
+                    streamId = streamId,
+                    now = now,
+                    next = next,
+                    programmes = programs,
+                    immediate = streamId == focusedStreamId,
+                )
             }
+        }
+    }
+
+    private fun enqueueEpgUpdate(
+        streamId: Int,
+        now: XtreamProgram?,
+        next: XtreamProgram?,
+        programmes: List<XtreamProgram>,
+        immediate: Boolean,
+    ) {
+        pendingEpgUpdates[streamId] = Triple(now, next, programmes)
+        if (immediate) {
+            epgFlushJob?.cancel()
+            epgFlushJob = null
+            flushPendingEpgUpdates()
+        } else if (epgFlushJob?.isActive != true) {
+            epgFlushJob = viewModelScope.launch {
+                delay(EPG_BATCH_WINDOW_MS)
+                epgFlushJob = null
+                flushPendingEpgUpdates()
+            }
+        }
+    }
+
+    private fun flushPendingEpgUpdates() {
+        if (pendingEpgUpdates.isEmpty()) return
+        val batch = pendingEpgUpdates.toMap()
+        pendingEpgUpdates.clear()
+        _uiState.update { state ->
+            val merged = HashMap<Int, GuideEpg>(state.epg.size + batch.size)
+            merged.putAll(state.epg)
+            batch.forEach { (streamId, payload) ->
+                merged[streamId] = GuideWindowRows.mergeNowNext(
+                    merged[streamId],
+                    payload.first,
+                    payload.second,
+                    payload.third,
+                )
+            }
+            state.copy(epg = merged)
         }
     }
 
@@ -1603,7 +1665,8 @@ class XtreamLiveGuideViewModel @Inject constructor(
         /** Enough to scan by eye with a D-pad; a longer list means the query should be narrower. */
         private const val SEARCH_CAP = 300
         private const val ALL_CAP = 600   // ponytail: don't render 26k rows; categories are the real browse path
-        private const val EPG_FOCUS_DEBOUNCE_MS = 250L   // wait for focus to settle before fetching EPG
+        private const val EPG_FOCUS_DEBOUNCE_MS = 120L   // wait for focus to settle before fetching EPG
+        private const val EPG_BATCH_WINDOW_MS = 45L      // coalesce neighbour EPG replies into one emit
 
         /** Concurrent EPG requests allowed at the panel — the same ceiling TileEpgQueue uses, and
          *  the same one iptvnator settled on for the identical reason (providers rate-limit). */

@@ -32,6 +32,7 @@ import com.nuvio.tv.domain.model.FocusedPosterTrailerPlaybackTarget
 import com.nuvio.tv.domain.model.DetailImdbRatingsVisibility
 import com.nuvio.tv.domain.model.HomeLayout
 import com.nuvio.tv.domain.model.HomeImdbRatingsVisibility
+import com.nuvio.tv.domain.model.IptvSidebarMode
 import com.nuvio.tv.domain.model.SidebarDestination
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +79,9 @@ class LayoutPreferenceDataStore @Inject constructor(
     private val customCatalogTitlesKey = stringPreferencesKey("custom_catalog_titles")
     private val sidebarCollapsedKey = booleanPreferencesKey("sidebar_collapsed_by_default")
     private val hiddenSidebarDestinationsKey = stringPreferencesKey("hidden_sidebar_destinations")
+    private val iptvSidebarModeKey = stringPreferencesKey("iptv_sidebar_mode")
+    private val iptvStartOnLiveTvKey = booleanPreferencesKey("iptv_start_on_live_tv")
+    private val iptvGuideDirectFullscreenKey = booleanPreferencesKey("iptv_guide_direct_fullscreen")
     private val modernSidebarEnabledKey = booleanPreferencesKey("modern_sidebar_enabled")
     private val legacyModernSidebarEnabledKey = booleanPreferencesKey("glass_sidepanel_enabled")
     private val modernSidebarBlurEnabledKey = booleanPreferencesKey("modern_sidebar_blur_enabled")
@@ -241,6 +245,19 @@ class LayoutPreferenceDataStore @Inject constructor(
                 SidebarDestination.entries.firstOrNull { it.name == stored }
             }
             .toSet()
+    }
+
+    val iptvSidebarMode: Flow<IptvSidebarMode> = profileFlow { prefs ->
+        val raw = prefs[iptvSidebarModeKey]
+        IptvSidebarMode.entries.firstOrNull { it.name == raw } ?: IptvSidebarMode.HUB
+    }
+
+    val iptvStartOnLiveTv: Flow<Boolean> = profileFlow { prefs ->
+        prefs[iptvStartOnLiveTvKey] ?: false
+    }
+
+    val iptvGuideDirectFullscreen: Flow<Boolean> = profileFlow { prefs ->
+        prefs[iptvGuideDirectFullscreenKey] ?: false
     }
 
     val modernSidebarEnabled: Flow<Boolean> = profileFlow { prefs ->
@@ -582,6 +599,24 @@ class LayoutPreferenceDataStore @Inject constructor(
                 prefs[hiddenSidebarDestinationsKey] =
                     gson.toJson(destinations.map { it.name }.sorted())
             }
+        }
+    }
+
+    suspend fun setIptvSidebarMode(mode: IptvSidebarMode) {
+        store().edit { prefs ->
+            prefs[iptvSidebarModeKey] = mode.name
+        }
+    }
+
+    suspend fun setIptvStartOnLiveTv(enabled: Boolean) {
+        store().edit { prefs ->
+            prefs[iptvStartOnLiveTvKey] = enabled
+        }
+    }
+
+    suspend fun setIptvGuideDirectFullscreen(enabled: Boolean) {
+        store().edit { prefs ->
+            prefs[iptvGuideDirectFullscreenKey] = enabled
         }
     }
 

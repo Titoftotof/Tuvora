@@ -3,7 +3,12 @@ package com.nuvio.tv.data.local
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.nuvio.tv.core.profile.ProfileManager
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -32,6 +37,14 @@ class XtreamHubSelectionStore @Inject constructor(
 
     private fun store(pid: Int = profileManager.activeProfileId.value) = factory.get(pid, FEATURE)
 
+    /** Reactive selected provider for the active profile so split IPTV screens stay in sync. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val selectedAccountId: Flow<String?> = profileManager.activeProfileId
+        .flatMapLatest { pid ->
+            factory.get(pid, FEATURE).data.map { prefs -> prefs[accountKey] }
+        }
+        .distinctUntilChanged()
+
     /** One-shot read for the active profile — the hub restores from this at entry. */
     suspend fun read(): RememberedHubSelection {
         val prefs = store().data.first()
@@ -43,6 +56,13 @@ class XtreamHubSelectionStore @Inject constructor(
         store().edit { prefs ->
             if (accountId == null) prefs.remove(accountKey) else prefs[accountKey] = accountId
             prefs[sectionKey] = section
+        }
+    }
+
+    /** Persist only the selected provider (used when a screen's section is fixed by its route). */
+    suspend fun saveAccount(accountId: String?) {
+        store().edit { prefs ->
+            if (accountId == null) prefs.remove(accountKey) else prefs[accountKey] = accountId
         }
     }
 

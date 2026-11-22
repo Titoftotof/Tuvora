@@ -26,6 +26,18 @@ class GuidePlaybackInteractionPolicyTest {
         assertEquals(GuidePlaybackInteractionPolicy.Click.FULLSCREEN,
             GuidePlaybackInteractionPolicy.click("old", "old", null, true))
     }
+    @Test fun `direct fullscreen mode tunes and promotes on first OK`() {
+        assertEquals(GuidePlaybackInteractionPolicy.Click.TUNE_AND_FULLSCREEN,
+            GuidePlaybackInteractionPolicy.click("new", null, null, false, directFullscreen = true))
+        assertEquals(GuidePlaybackInteractionPolicy.Click.TUNE_AND_FULLSCREEN,
+            GuidePlaybackInteractionPolicy.click("other", "old", null, true, directFullscreen = true))
+        assertEquals(GuidePlaybackInteractionPolicy.Click.FULLSCREEN,
+            GuidePlaybackInteractionPolicy.click("new", "old", "new", false, directFullscreen = true))
+        assertEquals(GuidePlaybackInteractionPolicy.Click.FULLSCREEN,
+            GuidePlaybackInteractionPolicy.click("old", "old", null, true, directFullscreen = true))
+        assertEquals(GuidePlaybackInteractionPolicy.Click.RETRY,
+            GuidePlaybackInteractionPolicy.click("old", "old", null, false, directFullscreen = true))
+    }
     @Test fun `focus on another channel cannot inherit the playback error`() {
         assertFalse(GuidePlaybackInteractionPolicy.showFocusedError("new", "old"))
         assertFalse(GuidePlaybackInteractionPolicy.showFocusedError(null, "old"))

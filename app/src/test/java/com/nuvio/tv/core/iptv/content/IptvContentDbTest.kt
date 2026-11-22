@@ -1,5 +1,8 @@
 package com.nuvio.tv.core.iptv.content
 
+import com.nuvio.tv.core.iptv.M3uIngestMapping
+import com.nuvio.tv.core.iptv.M3uIngestRow
+
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -93,6 +96,24 @@ class IptvContentDbTest {
         assertEquals("http://h/live/u/p/2.ts", db.channelUrl(pid, 2))
         assertEquals("http://h/movie/u/p/3.mp4", db.vodUrl(pid, 3))
         assertNull(db.channelUrl(pid, 999))
+    }
+
+    @Test
+    fun `re-import restores the full channel name without changing its id`() = runTest {
+        val playlist = """
+            #EXTM3U
+            #EXTINF:-1 group-title="News, World",News, International
+            http://h/live/u/p/1.ts
+        """.trimIndent()
+        val entries = mutableListOf<M3UEntry>()
+        M3UParser.parseStream(playlist.reader().buffered(), onEntry = entries::add)
+        val channel = (M3uIngestMapping.map(entries.single(), login = null) as M3uIngestRow.Channel).row
+
+        db.ingest(pid) { it.addChannel(channel.copy(name = "International")) }
+        assertEquals("International", db.channelsFor(pid, null).single().name)
+
+        db.ingest(pid) { it.addChannel(channel) }
+        assertEquals(listOf(channel), db.channelsFor(pid, null))
     }
 
     @Test

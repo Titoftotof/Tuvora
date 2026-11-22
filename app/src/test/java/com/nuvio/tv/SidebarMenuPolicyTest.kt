@@ -108,14 +108,119 @@ class SidebarMenuPolicyTest {
         assertEquals("search", sidebarRouteOf(SidebarDestination.SEARCH))
         assertEquals("library", sidebarRouteOf(SidebarDestination.LIBRARY))
         assertEquals("xtream_hub", sidebarRouteOf(SidebarDestination.IPTV))
+        assertEquals("iptv_live", sidebarRouteOf(SidebarDestination.IPTV_LIVE))
+        assertEquals("iptv_movies", sidebarRouteOf(SidebarDestination.IPTV_MOVIES))
+        assertEquals("iptv_series", sidebarRouteOf(SidebarDestination.IPTV_SERIES))
         assertEquals("sports_hub", sidebarRouteOf(SidebarDestination.SPORTS))
         assertEquals("discover", sidebarRouteOf(SidebarDestination.DISCOVER))
         assertEquals("settings", sidebarRouteOf(SidebarDestination.SETTINGS))
     }
 
     @Test
+    fun `split IPTV mode expands IPTV into Live TV, Movies, and Series in place`() {
+        assertEquals(
+            listOf(
+                SidebarDestination.HOME,
+                SidebarDestination.SEARCH,
+                SidebarDestination.LIBRARY,
+                SidebarDestination.IPTV_LIVE,
+                SidebarDestination.IPTV_MOVIES,
+                SidebarDestination.IPTV_SERIES,
+                SidebarDestination.SPORTS,
+                SidebarDestination.SETTINGS
+            ),
+            visibleSidebarDestinations(
+                hidden = emptySet(),
+                discoverLocation = DiscoverLocation.IN_SEARCH,
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
+    }
+
+    @Test
+    fun `hiding IPTV hides all three split IPTV entries too`() {
+        val visible = visibleSidebarDestinations(
+            hidden = setOf(SidebarDestination.IPTV),
+            discoverLocation = DiscoverLocation.IN_SEARCH,
+            iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+        )
+        assertFalse(SidebarDestination.IPTV in visible)
+        assertFalse(SidebarDestination.IPTV_LIVE in visible)
+        assertFalse(SidebarDestination.IPTV_MOVIES in visible)
+        assertFalse(SidebarDestination.IPTV_SERIES in visible)
+        assertEquals(
+            setOf("home", "search", "library", "sports_hub", "settings"),
+            sidebarRootRoutes(visible)
+        )
+    }
+
+    @Test
     fun `every toggleable destination maps to a distinct route`() {
         val routes = SIDEBAR_TOGGLEABLE_DESTINATIONS.map(::sidebarRouteOf)
         assertEquals(routes.size, routes.toSet().size)
+    }
+
+    @Test
+    fun `resolveInitialStartDestination respects onboarding and startOnLiveTv`() {
+        assertEquals(
+            "experience_mode_selection",
+            resolveInitialStartDestination(
+                needsExperienceSelection = true,
+                layoutChosen = true,
+                startOnLiveTv = true,
+                hiddenSidebarDestinations = emptySet(),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
+        assertEquals(
+            "layout_selection",
+            resolveInitialStartDestination(
+                needsExperienceSelection = false,
+                layoutChosen = false,
+                startOnLiveTv = true,
+                hiddenSidebarDestinations = emptySet(),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
+        assertEquals(
+            "home",
+            resolveInitialStartDestination(
+                needsExperienceSelection = false,
+                layoutChosen = true,
+                startOnLiveTv = false,
+                hiddenSidebarDestinations = emptySet(),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
+        assertEquals(
+            "iptv_live",
+            resolveInitialStartDestination(
+                needsExperienceSelection = false,
+                layoutChosen = true,
+                startOnLiveTv = true,
+                hiddenSidebarDestinations = emptySet(),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
+        assertEquals(
+            "xtream_hub",
+            resolveInitialStartDestination(
+                needsExperienceSelection = false,
+                layoutChosen = true,
+                startOnLiveTv = true,
+                hiddenSidebarDestinations = emptySet(),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.HUB
+            )
+        )
+        assertEquals(
+            "home",
+            resolveInitialStartDestination(
+                needsExperienceSelection = false,
+                layoutChosen = true,
+                startOnLiveTv = true,
+                hiddenSidebarDestinations = setOf(SidebarDestination.IPTV),
+                iptvSidebarMode = com.nuvio.tv.domain.model.IptvSidebarMode.SPLIT
+            )
+        )
     }
 }

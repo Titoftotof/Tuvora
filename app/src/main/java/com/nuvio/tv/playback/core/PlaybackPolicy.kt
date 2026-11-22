@@ -257,12 +257,26 @@ class PlaybackPolicy(
     fun stablePlaybackResetsReconnectPressure(stableForMs: Long): Boolean =
         stableForMs >= liveReconnectConfiguration.minimumStablePlaybackBeforeResetMs
 
-    fun liveReconnectExhaustedFailure(): PlaybackFailure = PlaybackFailure(
-        code = FailureCode.LIVE_RECONNECT_EXHAUSTED,
-        domain = FailureDomain.NETWORK,
-        phase = FailurePhase.RECOVERY,
-        retryability = Retryability.FATAL,
-    )
+    fun liveReconnectExhaustedFailure(
+        lastAttemptFailure: PlaybackFailure? = null,
+        failedEngine: EngineType? = null,
+    ): PlaybackFailure {
+        if (lastAttemptFailure?.code == FailureCode.AUTHORIZATION_REJECTED) {
+            return lastAttemptFailure.copy(phase = FailurePhase.RECOVERY, retryability = Retryability.FATAL)
+        }
+        val canHandOff = failedEngine == EngineType.MEDIA3 &&
+            lastAttemptFailure?.domain == FailureDomain.NETWORK &&
+            (lastAttemptFailure.code == FailureCode.NETWORK_UNREACHABLE ||
+                lastAttemptFailure.code == FailureCode.NETWORK_TIMEOUT)
+        return PlaybackFailure(
+            code = FailureCode.LIVE_RECONNECT_EXHAUSTED,
+            domain = FailureDomain.NETWORK,
+            phase = FailurePhase.RECOVERY,
+            retryability = if (canHandOff) Retryability.HANDOFF_ELIGIBLE else Retryability.FATAL,
+            httpStatus = lastAttemptFailure?.httpStatus,
+            statusProvenance = lastAttemptFailure?.statusProvenance,
+        )
+    }
 
     /** Adapters report authorization evidence; provider-link freshness is a core concern. */
     fun normalizeAuthorizationRecovery(

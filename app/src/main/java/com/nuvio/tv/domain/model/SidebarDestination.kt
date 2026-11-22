@@ -15,6 +15,9 @@ enum class SidebarDestination {
     SEARCH,
     LIBRARY,
     IPTV,
+    IPTV_LIVE,
+    IPTV_MOVIES,
+    IPTV_SERIES,
     SPORTS,
     DISCOVER,
     SETTINGS

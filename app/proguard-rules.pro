@@ -54,6 +54,28 @@
 -keep class com.nuvio.tv.core.iptv.XtreamAccount { *; }
 -keep class com.nuvio.tv.core.iptv.CategorySelections { *; }
 
+# Keep Gson-serialized local DataStore / backup / sync models so R8 never strips or renames fields
+-keep class com.nuvio.tv.data.local.LiveChannelRef { *; }
+-keep class com.nuvio.tv.data.local.IptvHomeCategorySelection { *; }
+-keep class com.nuvio.tv.data.local.CachedInProgressItem { *; }
+-keep class com.nuvio.tv.data.local.CachedNextUpItem { *; }
+-keep class com.nuvio.tv.data.local.CachedStreamLink { *; }
+-keep class com.nuvio.tv.data.local.PersistedTrackPreference { *; }
+-keep class com.nuvio.tv.data.local.ProfileJson { *; }
+-keep class com.nuvio.tv.data.local.SerializableCollection { *; }
+-keep class com.nuvio.tv.data.local.SerializableFolder { *; }
+-keep class com.nuvio.tv.data.local.SerializableSource { *; }
+-keep class com.nuvio.tv.data.local.SerializableTmdbFilters { *; }
+-keep class com.nuvio.tv.data.local.SerializableCatalogSource { *; }
+-keep class com.nuvio.tv.data.local.CollectionsDataStore$** { *; }
+-keep class com.nuvio.tv.data.local.ContinueWatchingEnrichmentCache$** { *; }
+-keep class com.nuvio.tv.data.local.StreamBadgeSettingsDataStore$** { *; }
+-keep class com.nuvio.tv.core.backup.BackupManifest { *; }
+-keep class com.nuvio.tv.core.backup.BackupManifest$** { *; }
+-keep class com.nuvio.tv.core.sync.PendingProgressUpsert { *; }
+-keep class com.nuvio.tv.core.sync.PendingWatchedUpsert { *; }
+-keep class com.nuvio.tv.core.sync.WatchedMutationKey { *; }
+
 # ── Kotlin ─────────────────────────────────────────────────────────────────────
 -keepattributes *Annotation*
 -keepattributes InnerClasses

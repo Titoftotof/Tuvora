@@ -29,6 +29,7 @@ import com.nuvio.tv.domain.model.EpisodeOptionsOverlayStyle
 import com.nuvio.tv.domain.model.FocusedPosterTrailerPlaybackTarget
 import com.nuvio.tv.domain.model.HomeLayout
 import com.nuvio.tv.domain.model.HomeImdbRatingsVisibility
+import com.nuvio.tv.domain.model.IptvSidebarMode
 import com.nuvio.tv.domain.model.SidebarDestination
 import com.nuvio.tv.domain.model.enabledAddons
 import com.nuvio.tv.domain.repository.AddonRepository
@@ -50,6 +51,9 @@ data class LayoutSettingsUiState(
     val heroCatalogKeys: List<String> = emptyList(),
     val sidebarCollapsedByDefault: Boolean = false,
     val hiddenSidebarDestinations: Set<SidebarDestination> = emptySet(),
+    val iptvSidebarMode: IptvSidebarMode = IptvSidebarMode.HUB,
+    val iptvStartOnLiveTv: Boolean = false,
+    val iptvGuideDirectFullscreen: Boolean = false,
     val modernSidebarEnabled: Boolean = false,
     val modernSidebarBlurEnabled: Boolean = false,
     val modernLandscapePostersEnabled: Boolean = false,
@@ -112,6 +116,9 @@ sealed class LayoutSettingsEvent {
         val destination: SidebarDestination,
         val enabled: Boolean
     ) : LayoutSettingsEvent()
+    data class SetIptvSidebarMode(val mode: IptvSidebarMode) : LayoutSettingsEvent()
+    data class SetIptvStartOnLiveTv(val enabled: Boolean) : LayoutSettingsEvent()
+    data class SetIptvGuideDirectFullscreen(val enabled: Boolean) : LayoutSettingsEvent()
     data class SetModernSidebarEnabled(val enabled: Boolean) : LayoutSettingsEvent()
     data class SetModernSidebarBlurEnabled(val enabled: Boolean) : LayoutSettingsEvent()
     data class SetModernLandscapePostersEnabled(val enabled: Boolean) : LayoutSettingsEvent()
@@ -229,6 +236,21 @@ class LayoutSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             layoutPreferenceDataStore.hiddenSidebarDestinations.distinctUntilChanged().collectLatest { hidden ->
                 updateUiStateIfChanged { it.copy(hiddenSidebarDestinations = hidden) }
+            }
+        }
+        viewModelScope.launch {
+            layoutPreferenceDataStore.iptvSidebarMode.distinctUntilChanged().collectLatest { mode ->
+                updateUiStateIfChanged { it.copy(iptvSidebarMode = mode) }
+            }
+        }
+        viewModelScope.launch {
+            layoutPreferenceDataStore.iptvStartOnLiveTv.distinctUntilChanged().collectLatest { enabled ->
+                updateUiStateIfChanged { it.copy(iptvStartOnLiveTv = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            layoutPreferenceDataStore.iptvGuideDirectFullscreen.distinctUntilChanged().collectLatest { enabled ->
+                updateUiStateIfChanged { it.copy(iptvGuideDirectFullscreen = enabled) }
             }
         }
         viewModelScope.launch {
@@ -461,6 +483,9 @@ class LayoutSettingsViewModel @Inject constructor(
             is LayoutSettingsEvent.SetSidebarCollapsed -> setSidebarCollapsed(event.collapsed)
             is LayoutSettingsEvent.SetSidebarDestinationEnabled ->
                 setSidebarDestinationEnabled(event.destination, event.enabled)
+            is LayoutSettingsEvent.SetIptvSidebarMode -> setIptvSidebarMode(event.mode)
+            is LayoutSettingsEvent.SetIptvStartOnLiveTv -> setIptvStartOnLiveTv(event.enabled)
+            is LayoutSettingsEvent.SetIptvGuideDirectFullscreen -> setIptvGuideDirectFullscreen(event.enabled)
             is LayoutSettingsEvent.SetModernSidebarEnabled -> setModernSidebarEnabled(event.enabled)
             is LayoutSettingsEvent.SetModernSidebarBlurEnabled -> setModernSidebarBlurEnabled(event.enabled)
             is LayoutSettingsEvent.SetModernLandscapePostersEnabled -> setModernLandscapePostersEnabled(event.enabled)
@@ -621,12 +646,37 @@ class LayoutSettingsViewModel @Inject constructor(
         if (enabled == (destination !in hidden)) return
 
         val next = if (enabled) hidden - destination else hidden + destination
-        val currentVisible = visibleSidebarDestinations(hidden, current.discoverLocation)
+        val currentVisible = visibleSidebarDestinations(
+            hidden,
+            current.discoverLocation,
+            current.iptvSidebarMode
+        )
         // Refuse to hide the entry that would leave the sidebar empty.
         if (next.size > hidden.size && currentVisible.size <= 1) return
 
         viewModelScope.launch {
             layoutPreferenceDataStore.setHiddenSidebarDestinations(sanitizeHiddenSidebarDestinations(next))
+        }
+    }
+
+    private fun setIptvSidebarMode(mode: IptvSidebarMode) {
+        if (_uiState.value.iptvSidebarMode == mode) return
+        viewModelScope.launch {
+            layoutPreferenceDataStore.setIptvSidebarMode(mode)
+        }
+    }
+
+    private fun setIptvStartOnLiveTv(enabled: Boolean) {
+        if (_uiState.value.iptvStartOnLiveTv == enabled) return
+        viewModelScope.launch {
+            layoutPreferenceDataStore.setIptvStartOnLiveTv(enabled)
+        }
+    }
+
+    private fun setIptvGuideDirectFullscreen(enabled: Boolean) {
+        if (_uiState.value.iptvGuideDirectFullscreen == enabled) return
+        viewModelScope.launch {
+            layoutPreferenceDataStore.setIptvGuideDirectFullscreen(enabled)
         }
     }
 

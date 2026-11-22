@@ -522,6 +522,12 @@ private sealed interface ExternalMetaOutcome {
     object Failed : ExternalMetaOutcome
 }
 
+private fun MetaPreview.hasNativeIptvDetails(): Boolean =
+    when (com.nuvio.tv.core.iptv.XtreamItemRegistry.parseId(id)?.kind) {
+        "vod", "series" -> true
+        else -> false
+    }
+
 /**
  * Whether an external meta fetch is still outstanding. A TMDB success must not stand in for one
  * that has not resolved, and both gates ask this rather than keeping their own copy of the rule.
@@ -557,12 +563,12 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
     // Shimmer stand-ins carry a synthetic id. Enriching one resolves nothing and leaves the raw
     // "__placeholder_…" id sitting in the hero.
     if (isPlaceholderItemId(item.id)) return
-    val nativeMovie = com.nuvio.tv.core.iptv.XtreamItemRegistry.parseId(item.id)?.kind == "vod"
+    val nativeIptvDetails = item.hasNativeIptvDetails()
     if (startupGracePeriodActive) {
         deferredEnrichItem = item
         return
     }
-    if (!nativeMovie && (item.id in prefetchedTmdbIds || item.id in prefetchedExternalMetaIds)) {
+    if (!nativeIptvDetails && (item.id in prefetchedTmdbIds || item.id in prefetchedExternalMetaIds)) {
         // Only external enrichment re-opens this gate, so a cached external result still shuts out
         // an unresolved TMDB fetch. That is unchanged from before and deliberate: TMDB is never
         // marked prefetched when an item has no TMDB match, so gating on it too would re-enter on
@@ -613,7 +619,7 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
     val tmdbEnabledForCurrentLayout = currentTmdbSettings.enabled &&
         (_uiState.value.homeLayout != HomeLayout.MODERN || currentTmdbSettings.modernHomeEnabled)
     val focusProfileId = profileManager.activeProfileId.value
-    val willEnrich = nativeMovie || tmdbEnabledForCurrentLayout || externalMetaPrefetchEnabled
+    val willEnrich = nativeIptvDetails || tmdbEnabledForCurrentLayout || externalMetaPrefetchEnabled
 
     pendingTmdbEnrichItemId = item.id
     tmdbEnrichFocusJob?.cancel()
@@ -627,7 +633,7 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
         // The enrichment can proceed in the background without visual disruption.
         val alreadyEnriched = item.id in _enrichedPreviews.value
         if (willEnrich && !alreadyEnriched) setEnrichingItemId(item.id)
-        if (!nativeMovie && (item.id in prefetchedTmdbIds || item.id in prefetchedExternalMetaIds)) {
+        if (!nativeIptvDetails && (item.id in prefetchedTmdbIds || item.id in prefetchedExternalMetaIds)) {
             if (!externalEnrichmentOutstanding(item.id)) {
                 if (_enrichingItemId.value == item.id) setEnrichingItemId(null)
                 // Still prefetch full meta in background for instant detail screen.
@@ -645,9 +651,9 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
         }
 
         try {
-            // Native movie metadata belongs to the IPTV source, independently of addon prefetch.
+            // IPTV movie and series metadata belongs to the provider, independently of addon prefetch.
             // Only the settled focus requests details; no whole-category provider scan.
-            if (nativeMovie) {
+            if (nativeIptvDetails) {
                 val outcome = fetchExternalMetaOutcome(item)
                 if (profileManager.activeProfileId.value == focusProfileId &&
                     pendingTmdbEnrichItemId == item.id && outcome is ExternalMetaOutcome.Resolved) {
@@ -772,7 +778,7 @@ internal fun HomeViewModel.onItemFocusPipeline(item: MetaPreview) {
  * opportunistic and the focused path retries anyway, so aligning the two would only add requests.
  */
 internal fun HomeViewModel.preloadAdjacentItemPipeline(item: MetaPreview) {
-    if (com.nuvio.tv.core.iptv.XtreamItemRegistry.parseId(item.id)?.kind == "vod") return
+    if (item.hasNativeIptvDetails()) return
     if (startupGracePeriodActive) return
     if (item.id in prefetchedTmdbIds || item.id in prefetchedExternalMetaIds) return
     if (pendingTmdbEnrichItemId == item.id || pendingAdjacentPrefetchItemId == item.id) return

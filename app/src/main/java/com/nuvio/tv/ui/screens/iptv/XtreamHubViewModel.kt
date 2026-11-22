@@ -1,6 +1,7 @@
 package com.nuvio.tv.ui.screens.iptv
 
 import android.content.Context
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.R
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -137,12 +139,22 @@ class XtreamHubViewModel @Inject constructor(
     /** Step 0.3b: which of a playlist's servers failed last — the host the error card names. */
     private val failover: com.nuvio.tv.core.iptv.PlaylistServerFailover,
     layoutPreferenceDataStore: LayoutPreferenceDataStore,
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    savedStateHandle: SavedStateHandle
 ) : ViewModel() {
+
+    private val fixedSection: XtreamSection? = savedStateHandle
+        .get<String>(ARG_FIXED_SECTION)
+        ?.let { raw -> XtreamSection.entries.firstOrNull { it.name == raw } }
 
     // Starts in a bounded Loading (the accounts store has not answered yet), so even a store that never
     // emits ends the wait at the page deadline instead of an indefinite blank page.
-    private val _uiState = MutableStateFlow(XtreamHubUiState(categoriesLoad = BoundedLoad.begin(LoadSurface.HUB_CATEGORIES)))
+    private val _uiState = MutableStateFlow(
+        XtreamHubUiState(
+            section = fixedSection ?: XtreamSection.LIVE,
+            categoriesLoad = BoundedLoad.begin(LoadSurface.HUB_CATEGORIES)
+        )
+    )
     val uiState: StateFlow<XtreamHubUiState> = _uiState.asStateFlow()
 
     /** Recently-watched channels, newest first — the hub's "Recent Channels" row. */
@@ -248,6 +260,11 @@ class XtreamHubViewModel @Inject constructor(
             // accounts emission so a fresh entry restores it instead of resetting to the first
             // account. The section seeds once; after that the in-memory state is the truth.
             val remembered = selectionStore.read()
+            val startOnLiveTv = if (fixedSection == null) {
+                layoutPreferenceDataStore.iptvStartOnLiveTv.first()
+            } else {
+                false
+            }
             var restoreSection = true
             // Keep observing so playlist edits/enables from Settings refresh a hub VM that
             // stayed on the backstack (a one-shot first() served stale accounts until death).
@@ -256,14 +273,23 @@ class XtreamHubViewModel @Inject constructor(
                 .distinctUntilChanged()
                 .collect { (hasConfiguredAccounts, accounts) ->
                     val selected = resolveStickyAccount(_uiState.value.selectedAccountId, remembered.accountId, accounts)
-                    val wanted = if (restoreSection) {
+                    val section = if (fixedSection != null) {
                         restoreSection = false
-                        resolveStickySection(remembered.section, _uiState.value.section)
+                        fixedSection
                     } else {
-                        _uiState.value.section
+                        val wanted = if (restoreSection) {
+                            restoreSection = false
+                            if (startOnLiveTv) {
+                                XtreamSection.LIVE
+                            } else {
+                                resolveStickySection(remembered.section, _uiState.value.section)
+                            }
+                        } else {
+                            _uiState.value.section
+                        }
+                        // A disabled content type hides its tab — never leave the section on one.
+                        coerceSection(wanted, accounts.firstOrNull { it.id == selected })
                     }
-                    // A disabled content type hides its tab — never leave the section on one.
-                    val section = coerceSection(wanted, accounts.firstOrNull { it.id == selected })
                     _uiState.update { it.copy(accounts = accounts, hasConfiguredAccounts = hasConfiguredAccounts, selectedAccountId = selected, section = section) }
                     if (accounts.isEmpty()) {
                         _uiState.update { it.copy(categoriesLoad = LoadStatus.Idle) }
@@ -272,9 +298,23 @@ class XtreamHubViewModel @Inject constructor(
                     }
                 }
         }
+        // Keep the selected provider synchronized across split IPTV screens (Live TV / Movies / Series).
+        viewModelScope.launch {
+            selectionStore.selectedAccountId.collect { sharedAccountId ->
+                if (sharedAccountId == null) return@collect
+                val current = _uiState.value
+                if (current.selectedAccountId == sharedAccountId) return@collect
+                if (current.accounts.none { it.id == sharedAccountId }) return@collect
+                selectAccountInternal(sharedAccountId, persist = false)
+            }
+        }
     }
 
     fun selectAccount(accountId: String) {
+        selectAccountInternal(accountId, persist = true)
+    }
+
+    private fun selectAccountInternal(accountId: String, persist: Boolean) {
         if (accountId == _uiState.value.selectedAccountId) return
         // Whatever browse work the OLD provider still has queued belongs to a screen the user just
         // left — drop it rather than let it drain ahead of the new provider (which may share the
@@ -282,14 +322,33 @@ class XtreamHubViewModel @Inject constructor(
         // abandoned Stalker scroll backlog).
         com.nuvio.tv.core.iptv.stalker.StalkerPlaybackTraffic.onProviderSwitched()
         posterEnricher.onProviderSwitched(accountId)
-        val section = coerceSection(_uiState.value.section, _uiState.value.accounts.firstOrNull { it.id == accountId })
+        val section = fixedSection ?: coerceSection(_uiState.value.section, _uiState.value.accounts.firstOrNull { it.id == accountId })
         _uiState.update { it.copy(selectedAccountId = accountId, section = section, categories = emptyList(), itemsByCategory = emptyMap(), rowLoads = emptyMap()) }
-        rememberSelection()
+        if (persist) rememberSelection()
         loadCategories()
     }
 
     fun selectSection(section: XtreamSection) {
-        if (section == _uiState.value.section) return
+        if (fixedSection != null || section == _uiState.value.section) return
+        val acc = _uiState.value.selectedAccount
+        val catKey = acc?.let { "${it.id}|$section" }
+        val cached = if (catKey != null && section != XtreamSection.LIVE) categoriesCache[catKey] else null
+        if (acc != null && cached != null && acc.typeEnabled(section.typeKey)) {
+            val visible = cached.filter { acc.allowsCategory(section.typeKey, it.id, it.name) }
+            val items = visible.mapNotNull { c -> itemsCache["$catKey|${c.id}"]?.let { c.id to it } }.toMap()
+            _uiState.update {
+                it.copy(
+                    section = section,
+                    categories = visible,
+                    itemsByCategory = items,
+                    rowLoads = items.mapValues { (_, list) -> if (list.isEmpty()) LoadStatus.Empty else LoadStatus.Loaded },
+                    categoriesLoad = if (visible.isEmpty()) LoadStatus.Empty else LoadStatus.Loaded,
+                    error = null,
+                )
+            }
+            rememberSelection()
+            return
+        }
         _uiState.update { it.copy(section = section, categories = emptyList(), itemsByCategory = emptyMap(), rowLoads = emptyMap()) }
         rememberSelection()
         loadCategories()
@@ -298,7 +357,13 @@ class XtreamHubViewModel @Inject constructor(
     /** Fix 1: persist the on-screen provider + tab (per profile) so the next entry restores them. */
     private fun rememberSelection() {
         val st = _uiState.value
-        viewModelScope.launch { selectionStore.save(st.selectedAccountId, st.section.name) }
+        viewModelScope.launch {
+            if (fixedSection != null) {
+                selectionStore.saveAccount(st.selectedAccountId)
+            } else {
+                selectionStore.save(st.selectedAccountId, st.section.name)
+            }
+        }
     }
 
     /** Keeps the section on a content type the account has enabled (first enabled one otherwise). */
@@ -877,4 +942,8 @@ class XtreamHubViewModel @Inject constructor(
         val cornerRadiusDp: Int,
         val labelsEnabled: Boolean
     )
+
+    companion object {
+        const val ARG_FIXED_SECTION = "fixedSection"
+    }
 }

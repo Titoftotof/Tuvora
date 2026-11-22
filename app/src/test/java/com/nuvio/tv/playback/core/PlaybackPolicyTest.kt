@@ -7,6 +7,35 @@ import org.junit.Test
 
 class PlaybackPolicyTest {
     @Test
+    fun `spent live reconnect budget preserves HTTP evidence and only hands off Media3 network failures`() {
+        val networkFailure = PlaybackFailure(
+            code = FailureCode.NETWORK_UNREACHABLE,
+            domain = FailureDomain.NETWORK,
+            phase = FailurePhase.ENGINE_START,
+            retryability = Retryability.RETRYABLE_WITH_FRESH_REQUEST,
+            httpStatus = 503,
+            statusProvenance = HttpStatusProvenance.CONFIRMED,
+        )
+        val policy = PlaybackPolicy()
+        val media3 = policy.liveReconnectExhaustedFailure(networkFailure, EngineType.MEDIA3)
+        assertEquals(Retryability.HANDOFF_ELIGIBLE, media3.retryability)
+        assertEquals(503, media3.httpStatus)
+        assertEquals(HttpStatusProvenance.CONFIRMED, media3.statusProvenance)
+        val mpv = policy.liveReconnectExhaustedFailure(networkFailure, EngineType.LIBMPV)
+        assertEquals(Retryability.FATAL, mpv.retryability)
+
+        val refusal = networkFailure.copy(
+            code = FailureCode.AUTHORIZATION_REJECTED,
+            domain = FailureDomain.AUTHORIZATION_PROVIDER_LIMIT,
+            httpStatus = 403,
+        )
+        assertEquals(
+            refusal.copy(phase = FailurePhase.RECOVERY, retryability = Retryability.FATAL),
+            policy.liveReconnectExhaustedFailure(refusal, EngineType.MEDIA3),
+        )
+    }
+
+    @Test
     fun `authorization evidence has engine-neutral core recovery semantics`() {
         val policy = PlaybackPolicy()
         val media3 = PlaybackFailure(
